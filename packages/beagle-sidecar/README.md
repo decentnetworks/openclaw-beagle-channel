@@ -36,6 +36,53 @@ You can also use the helper script:
 
 `--token` is optional. If you set it, OpenClaw must send the same bearer token.
 
+## Profile + Welcome Config
+
+When you pass `--data-dir`, the sidecar will create:
+
+- `beagle_profile.json` (profile + welcome message)
+- `welcomed_peers.txt` (persisted list of peers already welcomed)
+- `beagle_db.json` (MySQL logging config)
+- `friend_state.tsv` (last known friend info/status snapshot)
+- `friend_events.log` (online/offline events)
+
+Edit `beagle_profile.json` at any time to update the user profile and welcome text.
+Default contents:
+
+```json
+{
+  "welcomeMessage": "Hi! I'm the Beagle OpenClaw bot. Send a message to start.",
+  "profile": {
+    "name": "Snoopy",
+    "gender": "2218",
+    "phone": "Claw Bot to Help",
+    "email": "SOL:,ETH:",
+    "description": "Ask me anything about beagle chat, Tell me who your are",
+    "region": "California"
+  }
+}
+```
+
+To enable MySQL logging, edit `beagle_db.json` and set `"enabled": true`.
+Default contents:
+
+```json
+{
+  "enabled": false,
+  "host": "localhost",
+  "port": 3306,
+  "user": "beagle",
+  "password": "A1anSn00py",
+  "database": "beagle"
+}
+```
+
+When enabled, the sidecar creates/uses:
+
+- `beagle_friend_info` (current info)
+- `beagle_friend_info_history` (changes over time)
+- `beagle_friend_events` (online/offline events)
+
 ## HTTP API
 
 - `GET /health` -> `{ "ok": true }`
