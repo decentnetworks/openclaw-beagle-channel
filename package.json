@@ -1,0 +1,29 @@
+{
+  "name": "openclaw-beagle-channel",
+  "version": "0.1.0",
+  "description": "OpenClaw channel plugin for Beagle Chat with media support",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "openclaw",
+    "channel",
+    "beagle",
+    "chat",
+    "media"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
