@@ -1,0 +1,39 @@
+# Example OpenClaw configuration for Beagle Chat channel
+# Copy this to your OpenClaw config directory and customize
+
+channels:
+  beagle:
+    # Enable the Beagle Chat channel
+    enabled: true
+    
+    accounts:
+      # Default account configuration
+      default:
+        # Base URL of the Beagle Carrier sidecar service
+        # The sidecar must be running and accessible at this URL
+        sidecarBaseUrl: "http://127.0.0.1:39091"
+        
+        # Authentication token for sidecar API calls
+        # Must match the AUTH_TOKEN configured in the sidecar service
+        authToken: "your-secret-token-here"
+        
+        # Polling interval for checking new messages (in milliseconds)
+        # Lower values = faster message delivery, higher CPU usage
+        # Default: 5000 (5 seconds)
+        pollInterval: 5000
+      
+      # Example: Additional account for a different sidecar instance
+      # alternate:
+      #   sidecarBaseUrl: "http://127.0.0.1:39092"
+      #   authToken: "different-token"
+      #   pollInterval: 3000
+
+# Global settings (optional)
+settings:
+  # Enable verbose logging for debugging
+  logLevel: "info"  # Options: debug, info, warn, error
+  
+  # Retry settings for failed API calls
+  retries:
+    maxAttempts: 3
+    backoffMs: 1000
