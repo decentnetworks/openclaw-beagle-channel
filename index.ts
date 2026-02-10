@@ -5,6 +5,7 @@
  * through the Beagle Chat platform.
  */
 
+import { createHmac } from 'crypto';
 import type {
   BeagleChannelConfig,
   BeagleMessage,
@@ -176,30 +177,30 @@ export class BeagleChannel {
   }
 
   /**
-   * Verify webhook signature
+   * Verify webhook signature using HMAC-SHA256
    */
   private verifyWebhookSignature(payload: BeagleWebhookPayload): boolean {
     if (!this.config?.webhookSecret || !payload.signature) {
       return false;
     }
 
-    // Simple signature verification
-    // In production, this should use HMAC or similar cryptographic verification
+    // Use HMAC-SHA256 for cryptographically secure signature verification
     const expectedSignature = this.generateSignature(JSON.stringify(payload.message));
     return payload.signature === expectedSignature;
   }
 
   /**
-   * Generate signature for webhook verification
+   * Generate HMAC-SHA256 signature for webhook verification
    */
   private generateSignature(data: string): string {
     if (!this.config?.webhookSecret) {
       return '';
     }
     
-    // Simple signature generation
-    // In production, use proper HMAC-SHA256 or similar
-    return Buffer.from(data + this.config.webhookSecret).toString('base64');
+    // Use HMAC-SHA256 for cryptographically secure signature generation
+    return createHmac('sha256', this.config.webhookSecret)
+      .update(data)
+      .digest('hex');
   }
 
   /**

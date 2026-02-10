@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Direct message sending via Beagle API
 - Webhook handling for incoming messages
 - User information retrieval
-- Webhook signature verification
+- HMAC-SHA256 webhook signature verification for secure webhook processing
 - Debug logging support
 - TypeScript type definitions for all Beagle entities
 - Comprehensive documentation and examples
@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OpenClaw channel plugin integration
 - Bearer token authentication for Beagle API
 - Message handler callback system
-- Secure webhook processing with signature verification
+- Cryptographically secure webhook signature verification using HMAC-SHA256
 - Error handling and logging
 - Full TypeScript support with type definitions
 

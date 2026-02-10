@@ -195,8 +195,9 @@ This package is designed to work with OpenClaw's plugin system. When installed i
 ## Security
 
 - **API Authentication**: All API requests use Bearer token authentication
-- **Webhook Verification**: Webhook signatures can be verified using the configured secret
+- **Webhook Verification**: Webhooks are verified using HMAC-SHA256 signatures with the configured secret
 - **Secure Configuration**: Store sensitive credentials in environment variables
+- **Cryptographic Security**: Uses Node.js crypto module for secure signature generation and verification
 
 ## Contributing
 
