@@ -1,9 +1,14 @@
 #include "beagle_sdk.h"
 
 #include <chrono>
+#include <ctime>
+#include <cstring>
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <unordered_set>
+
+#include <string.h>
 
 #if BEAGLE_SDK_STUB
 
@@ -54,7 +59,35 @@ struct RuntimeState {
   std::string user_id;
   std::string address;
   BeagleStatus status;
+  std::unordered_set<std::string> welcomed_peers;
 };
+
+static void send_welcome_once(RuntimeState* state, const std::string& peer, const char* reason) {
+  if (!state || peer.empty() || !state->carrier) return;
+  {
+    std::lock_guard<std::mutex> lock(state->state_mu);
+    if (state->welcomed_peers.find(peer) != state->welcomed_peers.end()) return;
+    state->welcomed_peers.insert(peer);
+  }
+
+  const std::string msg =
+      "Hi! I'm the Beagle OpenClaw bot. Send a message to start.";
+  uint32_t msgid = 0;
+  int rc = carrier_send_friend_message(state->carrier,
+                                       peer.c_str(),
+                                       msg.data(),
+                                       msg.size(),
+                                       &msgid,
+                                       nullptr,
+                                       nullptr);
+  if (rc < 0) {
+    std::cerr << "[beagle-sdk] welcome message failed (" << reason
+              << "): 0x" << std::hex << carrier_get_error() << std::dec << "\n";
+  } else {
+    std::cerr << "[beagle-sdk] welcome message sent (" << reason
+              << ") to " << peer << "\n";
+  }
+}
 
 void friend_message_callback(Carrier* carrier,
                              const char* from,
@@ -96,13 +129,14 @@ void friend_request_callback(Carrier* carrier,
                              void* context) {
   (void)info;
   (void)hello;
-  (void)context;
+  auto* state = static_cast<RuntimeState*>(context);
   if (!carrier || !userid) return;
   int rc = carrier_accept_friend(carrier, userid);
   if (rc < 0) {
     std::cerr << "[beagle-sdk] accept friend failed: 0x" << std::hex << carrier_get_error() << std::dec << "\n";
   } else {
     std::cerr << "[beagle-sdk] accepted friend: " << userid << "\n";
+    send_welcome_once(state, userid, "accepted");
   }
 }
 
@@ -135,10 +169,13 @@ void friend_connection_callback(Carrier* carrier,
                                 CarrierConnectionStatus status,
                                 void* context) {
   (void)carrier;
-  (void)context;
+  auto* state = static_cast<RuntimeState*>(context);
   std::cerr << "[beagle-sdk] friend " << (friendid ? friendid : "")
             << " is " << (status == CarrierConnectionStatus_Connected ? "online" : "offline")
             << "\n";
+  if (status == CarrierConnectionStatus_Connected && friendid) {
+    send_welcome_once(state, friendid, "online");
+  }
 }
 
 void friend_invite_callback(Carrier* carrier,
@@ -149,11 +186,25 @@ void friend_invite_callback(Carrier* carrier,
                             void* context) {
   (void)carrier;
   (void)bundle;
-  (void)context;
+  auto* state = static_cast<RuntimeState*>(context);
   std::string payload;
   if (data && len) payload.assign(static_cast<const char*>(data), len);
   std::cerr << "[beagle-sdk] invite from " << (from ? from : "")
             << " data=" << payload << "\n";
+
+  if (!state || !state->on_incoming || !from) return;
+  BeagleIncomingMessage incoming;
+  incoming.peer = from;
+  incoming.text = payload.empty() ? "[invite]" : payload;
+  incoming.ts = static_cast<long long>(std::time(nullptr));
+  state->on_incoming(incoming);
+
+  {
+    std::lock_guard<std::mutex> lock(state->state_mu);
+    state->status.last_peer = incoming.peer;
+    state->status.online_count++;
+    state->status.last_online_ts = incoming.ts;
+  }
 }
 } // namespace
 
@@ -240,6 +291,7 @@ bool BeagleSdk::send_text(const std::string& peer, const std::string& text) {
     std::cerr << "[beagle-sdk] send_text failed: 0x" << std::hex << carrier_get_error() << std::dec << "\n";
     return false;
   }
+  std::cerr << "[beagle-sdk] send_text ok msgid=" << msgid << " peer=" << peer << "\n";
   return true;
 }
 

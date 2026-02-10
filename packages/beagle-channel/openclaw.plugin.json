@@ -1,0 +1,12 @@
+{
+  "id": "beagle",
+  "name": "Beagle Chat",
+  "version": "0.1.0",
+  "channels": ["beagle"],
+  "main": "index.js",
+  "type": "channel",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true
+  }
+}

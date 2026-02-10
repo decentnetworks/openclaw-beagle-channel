@@ -2,8 +2,8 @@
   "name": "@beagle/openclaw-channel",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "main": "dist/index.js",
+  "type": "commonjs",
+  "main": "index.js",
   "types": "dist/index.d.ts",
   "files": ["dist"],
   "scripts": {

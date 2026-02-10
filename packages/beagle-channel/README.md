@@ -8,6 +8,7 @@ This package provides a Beagle Chat channel plugin for OpenClaw. It connects to 
 {
   "channels": {
     "beagle": {
+      "dmPolicy": "open",
       "accounts": {
         "default": {
           "enabled": true,
@@ -19,6 +20,31 @@ This package provides a Beagle Chat channel plugin for OpenClaw. It connects to 
   }
 }
 ```
+
+Add the plugin entry so OpenClaw loads the extension:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "beagle": { "enabled": true }
+    }
+  }
+}
+```
+
+## Install
+
+Build and copy the extension files into `~/.openclaw/extensions/beagle`:
+
+```bash
+npm run build
+mkdir -p ~/.openclaw/extensions/beagle
+cp package.json index.js openclaw.plugin.json ~/.openclaw/extensions/beagle/
+cp -r dist ~/.openclaw/extensions/beagle/
+```
+
+Restart OpenClaw after installing.
 
 ## Supported Features
 

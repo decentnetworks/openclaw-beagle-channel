@@ -28,6 +28,14 @@ Run with a Carrier config:
 ./build/beagle-sidecar --config $BEAGLE_SDK_ROOT/config/carrier.conf --data-dir ~/.carrier
 ```
 
+You can also use the helper script:
+
+```bash
+./start.sh
+```
+
+`--token` is optional. If you set it, OpenClaw must send the same bearer token.
+
 ## HTTP API
 
 - `GET /health` -> `{ "ok": true }`

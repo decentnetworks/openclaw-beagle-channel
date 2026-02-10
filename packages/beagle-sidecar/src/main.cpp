@@ -53,7 +53,15 @@ static std::string json_escape(const std::string& in) {
       case '\n': out += "\\n"; break;
       case '\r': out += "\\r"; break;
       case '\t': out += "\\t"; break;
-      default: out += c; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          char buf[7];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+          out += buf;
+        } else {
+          out += c;
+        }
+        break;
     }
   }
   return out;
@@ -92,14 +100,18 @@ static std::string read_until(int fd, const std::string& marker) {
 }
 
 static int get_content_length(const std::string& headers) {
-  std::string needle = "Content-Length:";
-  size_t pos = headers.find(needle);
+  std::string lower = headers;
+  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  std::string needle = "content-length:";
+  size_t pos = lower.find(needle);
   if (pos == std::string::npos) return 0;
   pos += needle.size();
-  while (pos < headers.size() && (headers[pos] == ' ' || headers[pos] == '\t')) pos++;
-  size_t end = headers.find("\r\n", pos);
-  if (end == std::string::npos) end = headers.size();
-  return std::atoi(headers.substr(pos, end - pos).c_str());
+  while (pos < lower.size() && (lower[pos] == ' ' || lower[pos] == '\t')) pos++;
+  size_t end = lower.find("\r\n", pos);
+  if (end == std::string::npos) end = lower.size();
+  return std::atoi(lower.substr(pos, end - pos).c_str());
 }
 
 static std::string header_value(const std::string& headers, const std::string& key) {
@@ -122,6 +134,15 @@ static void send_response(int fd, int code, const std::string& content_type, con
       << body;
   std::string out = oss.str();
   send(fd, out.c_str(), out.size(), 0);
+}
+
+static std::string client_ip(int fd) {
+  sockaddr_in addr{};
+  socklen_t len = sizeof(addr);
+  if (getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) return "";
+  char buf[INET_ADDRSTRLEN] = {0};
+  if (!inet_ntop(AF_INET, &addr.sin_addr, buf, sizeof(buf))) return "";
+  return std::string(buf);
 }
 
 static std::string to_iso8601(long long ts) {
@@ -147,6 +168,10 @@ static void push_event(const BeagleIncomingMessage& msg) {
 
   std::lock_guard<std::mutex> lock(g_events_mu);
   g_events.push_back(std::move(ev));
+  std::cerr << "[sidecar] queued event peer=" << msg.peer
+            << " text_len=" << msg.text.size()
+            << " ts=" << msg.ts
+            << "\n";
 }
 
 struct ServerOptions {
@@ -268,6 +293,8 @@ int main(int argc, char** argv) {
       std::string auth = header_value(headers, "Authorization");
       std::string expected = "Bearer " + opts.token;
       if (auth != expected) {
+        std::cerr << "[sidecar] unauthorized request for " << path
+                  << " from " << client_ip(client_fd) << "\n";
         send_response(client_fd, 401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
         close(client_fd);
         continue;
@@ -306,12 +333,21 @@ int main(int argc, char** argv) {
         std::lock_guard<std::mutex> lock(g_events_mu);
         events.swap(g_events);
       }
+      if (!events.empty()) {
+        std::string ua = header_value(headers, "User-Agent");
+        std::cerr << "[sidecar] /events -> " << events.size() << " event(s)"
+                  << " from " << client_ip(client_fd);
+        if (!ua.empty()) std::cerr << " ua=" << ua;
+        std::cerr << "\n";
+      }
       send_response(client_fd, 200, "application/json", events_to_json(std::move(events)));
     } else if (method == "POST" && path == "/sendText") {
       std::string peer;
       std::string text;
       extract_json_string(body, "peer", peer);
       extract_json_string(body, "text", text);
+      std::cerr << "[sidecar] /sendText peer=" << peer
+                << " text_len=" << text.size() << "\n";
 
       bool ok = sdk.send_text(peer, text);
       send_response(client_fd, ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
@@ -328,6 +364,10 @@ int main(int argc, char** argv) {
       extract_json_string(body, "mediaUrl", media_url);
       extract_json_string(body, "mediaType", media_type);
       extract_json_string(body, "filename", filename);
+      std::cerr << "[sidecar] /sendMedia peer=" << peer
+                << " caption_len=" << caption.size()
+                << " media_url_len=" << media_url.size()
+                << " media_path_len=" << media_path.size() << "\n";
 
       bool ok = sdk.send_media(peer, caption, media_path, media_url, media_type, filename);
       send_response(client_fd, ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
