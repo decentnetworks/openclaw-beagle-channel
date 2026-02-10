@@ -1,0 +1,76 @@
+# Example OpenClaw Configuration for Beagle Channel
+#
+# This file shows how to configure the Beagle/Elastos Carrier channel
+# in your OpenClaw setup.
+#
+# Note: This is a YAML example. Actual configuration format may vary
+# depending on your OpenClaw installation.
+
+# Beagle Channel Configuration
+channels:
+  beagle:
+    # Enable/disable the Beagle channel
+    enabled: true
+    
+    # Directory where Carrier stores persistent data
+    # This includes the node's identity, friend list, etc.
+    dataDir: "./data/beagle"
+    
+    # Bootstrap nodes for connecting to the Carrier network
+    # Leave empty to use defaults, or provide custom nodes
+    # Format: JSON array of bootstrap node objects
+    bootstrapNodes: |
+      [
+        {
+          "ipv4": "13.58.208.50",
+          "port": 33445,
+          "publicKey": "89vny8MrKdDKs7Uta9RzoD4AwPbNbMIL8+EgzX5MeZg="
+        },
+        {
+          "ipv4": "18.216.102.47",
+          "port": 33445,
+          "publicKey": "G5z8MqiNDCYYDt5fQrKaD4AwPbNbMIL8+EgzX5MeZg="
+        }
+      ]
+    
+    # Display name for your Carrier node
+    userName: "My OpenClaw Agent"
+    
+    # Description that other users can see
+    userDescription: "Personal AI Assistant powered by OpenClaw"
+    
+    # Pairing settings (following OpenClaw's security model)
+    pairing:
+      # Pairing policy: "open", "pairing", or "closed"
+      policy: "pairing"
+      
+      # Auto-accept friend requests from these Carrier addresses
+      allowFrom:
+        - "known_friend_address_1"
+        - "known_friend_address_2"
+
+# Alternative: Environment Variable Configuration
+# 
+# You can also configure the Beagle channel using environment variables:
+#
+# export BEAGLE_ENABLED=true
+# export BEAGLE_DATA_DIR="./data/beagle"
+# export BEAGLE_USER_NAME="My OpenClaw Agent"
+# export BEAGLE_USER_DESC="Personal AI Assistant"
+# export BEAGLE_BOOTSTRAP_NODES='[{"ipv4":"13.58.208.50","port":33445,"publicKey":"..."}]'
+
+# Advanced Settings (for future implementation)
+advanced:
+  # Maximum message size in bytes
+  maxMessageSize: 1024
+  
+  # Connection timeout in seconds
+  connectionTimeout: 30
+  
+  # Enable debug logging
+  debug: false
+  
+  # Retry settings
+  retry:
+    maxAttempts: 3
+    backoffMs: 1000
