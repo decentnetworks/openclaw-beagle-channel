@@ -3,7 +3,9 @@ Beagle Chat provider for OpenClaw, split into two subprojects:
 
 - `packages/beagle-channel` – OpenClaw channel plugin (TypeScript)
 - `packages/beagle-sidecar` – Beagle sidecar daemon (C++)
-
+  
+Check [INSTALL.md](https://github.com/decentnetworks/openclaw-beagle-channel/blob/main/INSTALL.md) for details.
+  
 ## Source Repositories
 
 Clone these two repositories to get started:
