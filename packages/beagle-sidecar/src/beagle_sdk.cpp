@@ -50,6 +50,13 @@ bool BeagleSdk::send_media(const std::string& peer,
   return true;
 }
 
+BeagleStatus BeagleSdk::status() const {
+  BeagleStatus s;
+  s.ready = true;
+  s.connected = true;
+  return s;
+}
+
 #else
 
 extern "C" {
