@@ -18,6 +18,44 @@ git clone https://github.com/0xli/Elastos.NET.Carrier.Native.SDK.git
 git clone https://github.com/decentnetworks/openclaw-beagle-channel.git
 ```
 
+## Install (Users)
+
+Prereqs: CMake + C++ toolchain, Node.js + npm.
+
+```bash
+git clone https://github.com/<org>/<repo>.git
+cd <repo>
+./install.sh
+```
+
+Then start the sidecar and enable the channel in OpenClaw:
+
+```bash
+./packages/beagle-sidecar/build/beagle-sidecar --port 39091
+```
+
+```json
+{
+  "channels": {
+    "beagle": {
+      "dmPolicy": "open",
+      "accounts": {
+        "default": {
+          "enabled": true,
+          "sidecarBaseUrl": "http://127.0.0.1:39091",
+          "authToken": "devtoken"
+        }
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "beagle": { "enabled": true }
+    }
+  }
+}
+```
+
 ## Quick Start (Dev)
 
 1. Build and run the sidecar (stub mode):
@@ -29,13 +67,20 @@ cmake --build build
 ./build/beagle-sidecar --port 39091
 ```
 
-2. Build the channel plugin:
+2. Build and install the channel plugin:
 
 ```bash
 cd packages/beagle-channel
 npm install
 npm run build
+
+# Install plugin to OpenClaw extensions
+mkdir -p ~/.openclaw/extensions/beagle
+cp package.json index.js openclaw.plugin.json ~/.openclaw/extensions/beagle/
+cp -r dist ~/.openclaw/extensions/beagle/
 ```
+
+See `packages/beagle-channel/README.md` for full plugin documentation.
 
 3. Configure OpenClaw to enable the Beagle channel:
 
