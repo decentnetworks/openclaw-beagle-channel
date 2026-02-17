@@ -2897,11 +2897,13 @@ bool BeagleSdk::send_media(const std::string& peer,
   bool peer_online = is_friend_online(&g_state, peer, peer_online_known);
   if (try_filetransfer_first && peer_online_known && !peer_online) {
     if (force_filetransfer) {
-      log_line(std::string("[beagle-sdk] send_media filetransfer-only mode but peer offline: ") + peer);
-      return false;
+      // In force mode, do not trust cached friend presence enough to abort.
+      // Filetransfer connect can still succeed when presence state is stale.
+      log_line(std::string("[beagle-sdk] send_media filetransfer-only mode with offline cache; still trying: ") + peer);
+    } else {
+      try_filetransfer_first = false;
+      log_line(std::string("[beagle-sdk] send_media skipping filetransfer because peer offline: ") + peer);
     }
-    try_filetransfer_first = false;
-    log_line(std::string("[beagle-sdk] send_media skipping filetransfer because peer offline: ") + peer);
   }
 
   if (try_filetransfer_first) {
