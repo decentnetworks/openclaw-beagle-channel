@@ -8,12 +8,22 @@ const { isAbsolute, resolve, join, basename } = require("path");
 const INBOUND_SEEN_MAX = 10_000;
 const inboundSeen = new Set<string>();
 const inboundSeenOrder: string[] = [];
+const inboundPollControllers = new Set<AbortController>();
 
 function normalizePeerId(value: any) {
   return String(value ?? "")
     .replace(/^beagle:\/\//i, "")
     .replace(/^beagle:/i, "")
+    .replace(/^(user|channel|group):/i, "")
+    .replace(/^[@#]/, "")
     .trim();
+}
+
+function isLikelyBeaglePeerId(value: any) {
+  const raw = normalizePeerId(value);
+  if (!raw) return false;
+  // Carrier IDs are base58-like and case-sensitive; keep original case.
+  return /^[1-9A-HJ-NP-Za-km-z]{30,120}$/.test(raw);
 }
 
 function parseMediaDirectiveInText(text: any) {
@@ -117,6 +127,27 @@ function resolveDefaultReplyImagePath() {
   return "";
 }
 
+function coerceMediaInput(mediaPath: any, mediaUrl: any) {
+  let nextMediaPath = String(mediaPath ?? "").trim();
+  let nextMediaUrl = String(mediaUrl ?? "").trim();
+
+  if (nextMediaPath) {
+    nextMediaPath = resolveLocalMediaPath(nextMediaPath);
+  }
+
+  // Some callers pass local files via mediaUrl (e.g. CLI --media path).
+  if (!nextMediaPath && nextMediaUrl) {
+    const maybeFileUrl = nextMediaUrl.replace(/^file:\/\//i, "");
+    const looksLocalPath = maybeFileUrl.startsWith("/") || maybeFileUrl.startsWith("~/") || maybeFileUrl.startsWith("./") || maybeFileUrl.startsWith("../");
+    if (looksLocalPath) {
+      nextMediaPath = resolveLocalMediaPath(maybeFileUrl);
+      nextMediaUrl = "";
+    }
+  }
+
+  return { mediaPath: nextMediaPath, mediaUrl: nextMediaUrl };
+}
+
 function isPictureRequest(text: any) {
   const t = String(text ?? "").toLowerCase();
   if (!t) return false;
@@ -145,6 +176,11 @@ function rememberInboundSignature(signature: string) {
   return true;
 }
 
+function abortInboundPollers() {
+  for (const controller of inboundPollControllers) controller.abort();
+  inboundPollControllers.clear();
+}
+
 // OpenClaw plugin entrypoint. Types are intentionally loose to avoid
 // coupling to a specific SDK version.
 export default function register(api: any) {
@@ -168,6 +204,13 @@ export default function register(api: any) {
       listAccountIds: (cfg: any) => Object.keys(cfg?.channels?.beagle?.accounts ?? {}),
       resolveAccount: (cfg: any, accountId?: string) => resolveAccount(cfg, accountId)
     },
+    messaging: {
+      normalizeTarget: (raw: any) => normalizePeerId(raw),
+      targetResolver: {
+        hint: "Use a Beagle peer ID, e.g. 7yZfjNbbUwtQuHQzkAH87ditQUzULhjfPz1LYdRnsqwh",
+        looksLikeId: (raw: string, normalized: string) => isLikelyBeaglePeerId(normalized || raw)
+      }
+    },
     outbound: {
       deliveryMode: "direct",
       sendText: async ({ cfg, accountId, chatId, text }: any) => {
@@ -179,11 +222,12 @@ export default function register(api: any) {
       sendMedia: async ({ cfg, accountId, chatId, caption, mediaPath, mediaUrl, mediaType, filename }: any) => {
         const account = resolveAccount(cfg, accountId);
         const client = createSidecarClient(account);
+        const media = coerceMediaInput(mediaPath, mediaUrl);
         await client.sendMedia({
           peer: normalizePeerId(chatId),
           caption,
-          mediaPath,
-          mediaUrl,
+          mediaPath: media.mediaPath,
+          mediaUrl: media.mediaUrl,
           mediaType,
           filename
         });
@@ -197,6 +241,8 @@ export default function register(api: any) {
   api.registerService({
     id: "beagle-inbound",
     start: async () => {
+      // Guard against duplicate poll loops if service start is invoked again.
+      abortInboundPollers();
       const cfg = api?.config ?? {};
       const accountIds = Object.keys(cfg?.channels?.beagle?.accounts ?? {});
       const accounts = accountIds.length ? accountIds : ["default"];
@@ -217,12 +263,16 @@ export default function register(api: any) {
 
         const client = createSidecarClient(account);
         const controller = new AbortController();
+        inboundPollControllers.add(controller);
 
         // Background poll loop for inbound messages.
         (async () => {
           while (!controller.signal.aborted) {
+            const requestController = new AbortController();
+            const relayAbort = () => requestController.abort();
+            controller.signal.addEventListener("abort", relayAbort, { once: true });
             try {
-              const events = await client.pollEvents(controller.signal);
+              const events = await client.pollEvents(requestController.signal);
               if (events.length > 0) {
                 api?.logger?.info?.(`[beagle] events=${events.length} account=${accountId}`);
               }
@@ -230,13 +280,20 @@ export default function register(api: any) {
                 await handleInboundEvent(api, accountId, account, ev);
               }
             } catch (err: any) {
+              if (controller.signal.aborted) break;
               const msg = err?.message ?? String(err);
               api?.logger?.warn?.(`beagle sidecar poll failed; retrying: ${msg}`);
               await sleep(1000);
+            } finally {
+              controller.signal.removeEventListener("abort", relayAbort);
             }
           }
+          inboundPollControllers.delete(controller);
         })();
       }
+    },
+    stop: async () => {
+      abortInboundPollers();
     }
   });
 }
@@ -408,6 +465,9 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
               mediaPath = resolvedMediaPath;
             }
           }
+          const media = coerceMediaInput(mediaPath, mediaUrl);
+          mediaPath = media.mediaPath;
+          mediaUrl = media.mediaUrl;
           if (mediaUrl || mediaPath) {
             api?.logger?.info?.("[beagle] sendMedia");
             await client.sendMedia({
