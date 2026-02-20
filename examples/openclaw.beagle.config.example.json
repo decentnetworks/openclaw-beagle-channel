@@ -1,0 +1,28 @@
+{
+  "channels": {
+    "beagle": {
+      "dmPolicy": "open",
+      "accounts": {
+        "default": {
+          "enabled": true,
+          "sidecarBaseUrl": "http://127.0.0.1:39091",
+          "authToken": "replace-with-your-token",
+          "trustedGroupPeers": [
+            "replace-with-group-userid"
+          ],
+          "trustedGroupAddresses": [
+            "replace-with-group-address"
+          ],
+          "requireTrustedGroup": false
+        }
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "beagle": {
+        "enabled": true
+      }
+    }
+  }
+}
