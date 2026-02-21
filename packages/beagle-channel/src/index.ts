@@ -8,7 +8,7 @@ const { isAbsolute, resolve, join, basename } = require("path");
 const INBOUND_SEEN_MAX = 10_000;
 const inboundSeen = new Set<string>();
 const inboundSeenOrder: string[] = [];
-const inboundPollControllers = new Set<AbortController>();
+const inboundPollControllers = new Map<string, AbortController>();
 const CARRIER_GROUP_MESSAGE_PREFIX = "CGP1 ";
 const CARRIER_GROUP_REPLY_PREFIX = "CGR1 ";
 
@@ -308,9 +308,108 @@ function rememberInboundSignature(signature: string) {
   return true;
 }
 
+function abortInboundPoller(accountId: string, controller?: AbortController) {
+  const active = inboundPollControllers.get(accountId);
+  if (!active) return;
+  if (controller && active !== controller) return;
+  active.abort();
+  inboundPollControllers.delete(accountId);
+}
+
 function abortInboundPollers() {
-  for (const controller of inboundPollControllers) controller.abort();
+  for (const controller of inboundPollControllers.values()) controller.abort();
   inboundPollControllers.clear();
+}
+
+async function runInboundPollLoop({
+  api,
+  accountId,
+  account,
+  abortSignal,
+  setStatus,
+  log
+}: {
+  api: any;
+  accountId: string;
+  account: BeagleAccount;
+  abortSignal: AbortSignal;
+  setStatus?: (next: any) => void;
+  log?: any;
+}) {
+  const client = createSidecarClient(account);
+  const controller = new AbortController();
+  const relayAbort = () => controller.abort();
+  abortSignal.addEventListener("abort", relayAbort, { once: true });
+  abortInboundPoller(accountId);
+  inboundPollControllers.set(accountId, controller);
+
+  const safeWarn = (message: string) => {
+    try {
+      log?.warn?.(message);
+    } catch {
+      // ignore logger failures
+    }
+  };
+
+  const safeSetStatus = (next: any) => {
+    if (!setStatus) return;
+    try {
+      setStatus(next);
+    } catch (statusErr: any) {
+      safeWarn(`[${accountId}] beagle status update failed: ${String(statusErr)}`);
+    }
+  };
+
+  try {
+    while (!controller.signal.aborted) {
+      const requestController = new AbortController();
+      const relayRequestAbort = () => requestController.abort();
+      controller.signal.addEventListener("abort", relayRequestAbort, { once: true });
+      try {
+        const events = await client.pollEvents(requestController.signal);
+        safeSetStatus({
+          accountId,
+          connected: true,
+          lastError: null,
+          lastConnectedAt: Date.now()
+        });
+        if (events.length > 0) {
+          api?.logger?.info?.(`[beagle] events=${events.length} account=${accountId}`);
+          safeSetStatus({
+            accountId,
+            lastEventAt: Date.now()
+          });
+        }
+        for (const ev of events) {
+          await handleInboundEvent(api, accountId, account, ev);
+          safeSetStatus({
+            accountId,
+            lastInboundAt: Date.now()
+          });
+        }
+      } catch (err: any) {
+        if (controller.signal.aborted) break;
+        const msg = err?.message ?? String(err);
+        safeWarn(`[${accountId}] beagle sidecar poll failed; retrying: ${msg}`);
+        safeSetStatus({
+          accountId,
+          connected: false,
+          lastError: msg,
+          lastDisconnect: {
+            at: Date.now(),
+            error: msg
+          }
+        });
+        await sleep(1000);
+      } finally {
+        controller.signal.removeEventListener("abort", relayRequestAbort);
+      }
+    }
+  } finally {
+    safeWarn(`[${accountId}] beagle inbound poll loop exited (aborted=${controller.signal.aborted} upstreamAborted=${abortSignal.aborted})`);
+    abortSignal.removeEventListener("abort", relayAbort);
+    abortInboundPoller(accountId, controller);
+  }
 }
 
 // OpenClaw plugin entrypoint. Types are intentionally loose to avoid
@@ -333,7 +432,13 @@ export default function register(api: any) {
       media: true
     },
     config: {
-      listAccountIds: (cfg: any) => Object.keys(cfg?.channels?.beagle?.accounts ?? {}),
+      listAccountIds: (cfg: any) => {
+        const ids = Object.keys(cfg?.channels?.beagle?.accounts ?? {});
+        return ids.length > 0 ? ids : ["default"];
+      },
+      defaultAccountId: () => "default",
+      isConfigured: () => true,
+      describeAccount: () => ({ configured: true }),
       resolveAccount: (cfg: any, accountId?: string) => resolveAccount(cfg, accountId)
     },
     messaging: {
@@ -365,69 +470,27 @@ export default function register(api: any) {
         });
         return { ok: true };
       }
+    },
+    gateway: {
+      startAccount: async ({ cfg, accountId, account, abortSignal, setStatus, log }: any) => {
+        const resolvedAccount = account ?? resolveAccount(cfg, accountId);
+        log?.info?.(`[${accountId}] beagle inbound poll start (${resolvedAccount.sidecarBaseUrl})`);
+        await runInboundPollLoop({
+          api,
+          accountId,
+          account: resolvedAccount,
+          abortSignal,
+          setStatus,
+          log
+        });
+      },
+      stopAccount: async ({ accountId }: any) => {
+        abortInboundPoller(accountId);
+      }
     }
   };
 
   api.registerChannel({ plugin: channelPlugin });
-
-  api.registerService({
-    id: "beagle-inbound",
-    start: async () => {
-      // Guard against duplicate poll loops if service start is invoked again.
-      abortInboundPollers();
-      const cfg = api?.config ?? {};
-      const accountIds = Object.keys(cfg?.channels?.beagle?.accounts ?? {});
-      const accounts = accountIds.length ? accountIds : ["default"];
-      api?.logger?.info?.(`[beagle] inbound service start (accounts=${accounts.join(",")})`);
-      try {
-        const runtimeKeys = Object.keys(api?.runtime?.channels ?? {});
-        const gatewayKeys = Object.keys(api?.gateway?.channels ?? {});
-        api?.logger?.info?.(`[beagle] runtime.channels keys=${runtimeKeys.join(",") || "(none)"}`);
-        api?.logger?.info?.(`[beagle] gateway.channels keys=${gatewayKeys.join(",") || "(none)"}`);
-      } catch {
-        // ignore introspection errors
-      }
-
-      for (const accountId of accounts) {
-        const account = resolveAccount(cfg, accountId);
-        if (account.enabled === false) continue;
-        api?.logger?.info?.(`[beagle] polling ${accountId} at ${account.sidecarBaseUrl}`);
-
-        const client = createSidecarClient(account);
-        const controller = new AbortController();
-        inboundPollControllers.add(controller);
-
-        // Background poll loop for inbound messages.
-        (async () => {
-          while (!controller.signal.aborted) {
-            const requestController = new AbortController();
-            const relayAbort = () => requestController.abort();
-            controller.signal.addEventListener("abort", relayAbort, { once: true });
-            try {
-              const events = await client.pollEvents(requestController.signal);
-              if (events.length > 0) {
-                api?.logger?.info?.(`[beagle] events=${events.length} account=${accountId}`);
-              }
-              for (const ev of events) {
-                await handleInboundEvent(api, accountId, account, ev);
-              }
-            } catch (err: any) {
-              if (controller.signal.aborted) break;
-              const msg = err?.message ?? String(err);
-              api?.logger?.warn?.(`beagle sidecar poll failed; retrying: ${msg}`);
-              await sleep(1000);
-            } finally {
-              controller.signal.removeEventListener("abort", relayAbort);
-            }
-          }
-          inboundPollControllers.delete(controller);
-        })();
-      }
-    },
-    stop: async () => {
-      abortInboundPollers();
-    }
-  });
 }
 
 function resolveAccount(cfg: any, accountId?: string): BeagleAccount {
@@ -640,11 +703,13 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       api?.logger?.warn?.("[beagle] picture shortcut requested but no default image found");
     }
 
+    let deliveredCount = 0;
     const dispatchPromise = core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg: api?.config ?? {},
       dispatcherOptions: {
         deliver: async (payload: any) => {
+          deliveredCount += 1;
           const text = payload?.text ?? "";
           api?.logger?.info?.(`[beagle] deliver kind=${payload?.kind ?? "unknown"} text_len=${text.length}`);
           let mediaUrl = payload?.mediaUrl || (Array.isArray(payload?.mediaUrls) ? payload.mediaUrls[0] : "");
@@ -705,8 +770,28 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       const result: any = await Promise.race([dispatchPromise, timeoutPromise]);
       queuedFinal = result?.queuedFinal;
       api?.logger?.info?.(`[beagle] dispatch queuedFinal=${queuedFinal} duration_ms=${Date.now() - dispatchStart}`);
+      if (queuedFinal !== true && deliveredCount === 0) {
+        const fallbackText = isGroup
+          ? buildCarrierGroupReplyText(
+              "I received your message but did not produce a final reply. Please resend.",
+              parsedGroup as ParsedGroupInbound
+            )
+          : "I received your message but did not produce a final reply. Please resend.";
+        api?.logger?.warn?.("[beagle] dispatch completed without outbound reply; sending fallback");
+        await client.sendText({ peer: normalizedPeerId, text: fallbackText });
+      }
     } catch (err: any) {
       api?.logger?.warn?.(`[beagle] dispatch failed duration_ms=${Date.now() - dispatchStart}: ${String(err)}`);
+      if (deliveredCount === 0) {
+        const fallbackText = isGroup
+          ? buildCarrierGroupReplyText(
+              "I hit a timeout before final reply. Please resend once.",
+              parsedGroup as ParsedGroupInbound
+            )
+          : "I hit a timeout before final reply. Please resend once.";
+        api?.logger?.warn?.("[beagle] dispatch failed without outbound reply; sending timeout fallback");
+        await client.sendText({ peer: normalizedPeerId, text: fallbackText });
+      }
     }
   } catch (err: any) {
     api?.logger?.warn?.(`[beagle] handleInboundEvent failed: ${String(err)}`);

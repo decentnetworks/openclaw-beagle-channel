@@ -63,3 +63,11 @@ Restart OpenClaw after installing.
 npm install
 npm run build
 ```
+
+## Troubleshooting
+
+- If gateway logs show `dispatch queuedFinal=false` and no `deliver`/`sendText`, the agent route produced no final output for that inbound turn.
+- The channel now sends a fallback text when no outbound message was delivered, so group/DM users do not see silent drops.
+- Useful logs:
+  - `journalctl --user -u openclaw-gateway.service -f`
+  - `journalctl --user -u beagle-sidecar.service -f`
