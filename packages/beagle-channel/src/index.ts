@@ -11,6 +11,8 @@ const inboundSeenOrder: string[] = [];
 const inboundPollControllers = new Map<string, AbortController>();
 const CARRIER_GROUP_MESSAGE_PREFIX = "CGP1 ";
 const CARRIER_GROUP_REPLY_PREFIX = "CGR1 ";
+const CARRIER_GROUP_STATUS_PREFIX = "CGS1 ";
+const BEAGLE_STATUS_PREFIX = "BGS1 ";
 
 type CarrierGroupInboundEnvelope = {
   type?: string;
@@ -64,6 +66,48 @@ type ParsedGroupInbound = {
   messageText: string;
   timestamp?: number;
 };
+
+type AgentStatusState = "typing" | "thinking" | "tool" | "sending" | "idle" | "error";
+
+function buildStatusText({
+  state,
+  phase,
+  ttlMs,
+  seq,
+  isGroup,
+  parsedGroup
+}: {
+  state: AgentStatusState;
+  phase?: string;
+  ttlMs: number;
+  seq: string;
+  isGroup: boolean;
+  parsedGroup?: ParsedGroupInbound | null;
+}) {
+  const payload: any = {
+    type: "agent_status",
+    version: 1,
+    chat_type: isGroup ? "group" : "direct",
+    source: "openclaw_beagle_channel",
+    status: {
+      state,
+      phase,
+      ttl_ms: ttlMs,
+      seq,
+      ts: Math.floor(Date.now() / 1000)
+    }
+  };
+
+  if (isGroup) {
+    payload.group = {
+      userid: parsedGroup?.groupUserId || undefined,
+      address: parsedGroup?.groupAddress || undefined,
+      name: parsedGroup?.groupNickname || undefined
+    };
+  }
+
+  return `${isGroup ? CARRIER_GROUP_STATUS_PREFIX : BEAGLE_STATUS_PREFIX}${JSON.stringify(payload)}`;
+}
 
 function parseCarrierGroupInbound(rawText: any): ParsedGroupInbound | null {
   const raw = String(rawText ?? "");
@@ -635,6 +679,12 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       `[Beagle channel note: do not call the "message" tool for this conversation. ` +
       `Reply with plain text. If you need to send media, include one line: MEDIA:<local_file_path>]`;
 
+    const shouldComputeCommandAuthorized =
+      core?.channel?.commands?.shouldComputeCommandAuthorized?.(body, api?.config ?? {}) === true;
+    // Beagle currently trusts inbound peers through carrier friendship/trusted-group checks.
+    // Mark command messages as authorized so built-in slash commands (/status, /help, etc.) can run.
+    const commandAuthorized = shouldComputeCommandAuthorized ? true : undefined;
+
     const ctxPayload = core.channel.reply.finalizeInboundContext({
       Body: body,
       BodyForAgent: bodyForAgent,
@@ -671,7 +721,8 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       MessageSid: ev?.msgId,
       Timestamp: timestamp,
       OriginatingChannel: "beagle",
-      OriginatingTo: `beagle:${conversationId}`
+      OriginatingTo: `beagle:${conversationId}`,
+      CommandAuthorized: commandAuthorized
     });
 
     api?.logger?.info?.(
@@ -703,13 +754,55 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       api?.logger?.warn?.("[beagle] picture shortcut requested but no default image found");
     }
 
+    const statusTtlMs = Number((globalThis as any)?.process?.env?.BEAGLE_STATUS_TTL_MS || 12000);
+    const statusMinIntervalMs = Number((globalThis as any)?.process?.env?.BEAGLE_STATUS_MIN_INTERVAL_MS || 2500);
+    let lastStatusState = "";
+    let lastStatusPhase = "";
+    let lastStatusSentAt = 0;
+    const sendStatus = async (state: AgentStatusState, phase = "", force = false) => {
+      const now = Date.now();
+      if (!force && state === lastStatusState && phase === lastStatusPhase && now - lastStatusSentAt < statusMinIntervalMs) {
+        return;
+      }
+      const seq = `${now.toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      const text = buildStatusText({
+        state,
+        phase,
+        ttlMs: statusTtlMs > 0 ? statusTtlMs : 12000,
+        seq,
+        isGroup,
+        parsedGroup
+      });
+      try {
+        await client.sendStatus({
+          peer: normalizedPeerId,
+          state,
+          phase,
+          ttlMs: statusTtlMs > 0 ? statusTtlMs : 12000,
+          chatType: isGroup ? "group" : "direct",
+          groupUserId: parsedGroup?.groupUserId,
+          groupAddress: parsedGroup?.groupAddress,
+          groupName: parsedGroup?.groupNickname,
+          seq
+        });
+        lastStatusState = state;
+        lastStatusPhase = phase;
+        lastStatusSentAt = now;
+        api?.logger?.info?.(`[beagle] sendStatus state=${state} phase=${phase || "(none)"} text_len=${text.length}`);
+      } catch (statusErr: any) {
+        api?.logger?.warn?.(`[beagle] sendStatus failed state=${state}: ${String(statusErr)}`);
+      }
+    };
+
     let deliveredCount = 0;
+    const deliveredFingerprints = new Set<string>();
     const dispatchPromise = core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg: api?.config ?? {},
       dispatcherOptions: {
-        deliver: async (payload: any) => {
+        deliver: async (payload: any, info: any) => {
           deliveredCount += 1;
+          if (info?.kind === "final") await sendStatus("sending", "final", true);
           const text = payload?.text ?? "";
           api?.logger?.info?.(`[beagle] deliver kind=${payload?.kind ?? "unknown"} text_len=${text.length}`);
           let mediaUrl = payload?.mediaUrl || (Array.isArray(payload?.mediaUrls) ? payload.mediaUrls[0] : "");
@@ -738,6 +831,19 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
           const replyText = isGroup
             ? buildCarrierGroupReplyText(captionText, parsedGroup as ParsedGroupInbound)
             : captionText;
+          const fingerprint = [
+            payload?.kind ?? "unknown",
+            replyText || "",
+            mediaPath || "",
+            mediaUrl || "",
+            mediaType || "",
+            filename || ""
+          ].join("\u0001");
+          if (deliveredFingerprints.has(fingerprint)) {
+            api?.logger?.warn?.("[beagle] skip duplicate outbound payload");
+            return;
+          }
+          deliveredFingerprints.add(fingerprint);
           if (mediaUrl || mediaPath) {
             api?.logger?.info?.("[beagle] sendMedia");
             await client.sendMedia({
@@ -755,7 +861,17 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
             await client.sendText({ peer: normalizedPeerId, text: replyText });
           }
         },
+        onReplyStart: () => {
+          void sendStatus("typing", "thinking");
+        },
+        onIdle: () => {
+          void sendStatus("idle", "complete", true);
+        },
+        onCleanup: () => {
+          void sendStatus("idle", "cleanup", true);
+        },
         onError: (err: any, info: any) => {
+          void sendStatus("error", String(info?.kind ?? "unknown"), true);
           api?.logger?.warn?.(`[beagle] reply failed (${info?.kind ?? "unknown"}): ${String(err)}`);
         }
       }
@@ -779,6 +895,7 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
           : "I received your message but did not produce a final reply. Please resend.";
         api?.logger?.warn?.("[beagle] dispatch completed without outbound reply; sending fallback");
         await client.sendText({ peer: normalizedPeerId, text: fallbackText });
+        await sendStatus("idle", "fallback", true);
       }
     } catch (err: any) {
       api?.logger?.warn?.(`[beagle] dispatch failed duration_ms=${Date.now() - dispatchStart}: ${String(err)}`);
@@ -791,6 +908,7 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
           : "I hit a timeout before final reply. Please resend once.";
         api?.logger?.warn?.("[beagle] dispatch failed without outbound reply; sending timeout fallback");
         await client.sendText({ peer: normalizedPeerId, text: fallbackText });
+        await sendStatus("idle", "timeout_fallback", true);
       }
     }
   } catch (err: any) {

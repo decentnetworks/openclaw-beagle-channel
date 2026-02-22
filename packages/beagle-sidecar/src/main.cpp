@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -108,6 +109,42 @@ static bool extract_json_string(const std::string& body, const std::string& key,
   if (pos == std::string::npos) return false;
   size_t end_pos = pos;
   return decode_json_string(body, pos, out, end_pos);
+}
+
+static bool extract_json_int(const std::string& body, const std::string& key, int& out) {
+  std::string needle = "\"" + key + "\"";
+  size_t pos = body.find(needle);
+  if (pos == std::string::npos) return false;
+  pos = body.find(':', pos + needle.size());
+  if (pos == std::string::npos) return false;
+  ++pos;
+  while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t' || body[pos] == '\r' || body[pos] == '\n')) {
+    ++pos;
+  }
+  if (pos >= body.size()) return false;
+
+  if (body[pos] == '"') {
+    std::string text;
+    size_t end_pos = pos;
+    if (!decode_json_string(body, pos, text, end_pos)) return false;
+    try {
+      out = std::stoi(text);
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+
+  size_t end = pos;
+  if (body[end] == '-') ++end;
+  while (end < body.size() && std::isdigit(static_cast<unsigned char>(body[end]))) ++end;
+  if (end == pos) return false;
+  try {
+    out = std::stoi(body.substr(pos, end - pos));
+    return true;
+  } catch (...) {
+    return false;
+  }
 }
 
 static std::string json_escape(const std::string& in) {
@@ -442,6 +479,41 @@ int main(int argc, char** argv) {
                + " out_format=" + (out_format.empty() ? "(default)" : out_format));
 
       bool ok = sdk.send_media(peer, caption, media_path, media_url, media_type, filename, out_format);
+      send_response(client_fd, ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+    } else if (method == "POST" && path == "/sendStatus") {
+      std::string peer;
+      std::string state;
+      std::string phase;
+      std::string chat_type;
+      std::string group_user_id;
+      std::string group_address;
+      std::string group_name;
+      std::string seq;
+      int ttl_ms = 12000;
+      extract_json_string(body, "peer", peer);
+      extract_json_string(body, "state", state);
+      extract_json_string(body, "phase", phase);
+      extract_json_string(body, "chatType", chat_type);
+      extract_json_string(body, "groupUserId", group_user_id);
+      extract_json_string(body, "groupAddress", group_address);
+      extract_json_string(body, "groupName", group_name);
+      extract_json_string(body, "seq", seq);
+      int parsed_ttl = 0;
+      if (extract_json_int(body, "ttlMs", parsed_ttl) && parsed_ttl > 0) ttl_ms = parsed_ttl;
+      log_line(std::string("[sidecar] /sendStatus peer=") + peer
+               + " state=" + state
+               + " phase=" + phase
+               + " chat_type=" + (chat_type.empty() ? "(auto)" : chat_type)
+               + " ttl_ms=" + std::to_string(ttl_ms));
+      bool ok = sdk.send_status(peer,
+                                state,
+                                phase,
+                                ttl_ms,
+                                chat_type,
+                                group_user_id,
+                                group_address,
+                                group_name,
+                                seq);
       send_response(client_fd, ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
     } else {
       send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"not_found\"}");

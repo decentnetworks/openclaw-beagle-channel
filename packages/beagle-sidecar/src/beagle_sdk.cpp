@@ -2771,6 +2771,68 @@ bool BeagleSdk::send_text(const std::string& peer, const std::string& text) {
   return true;
 }
 
+bool BeagleSdk::send_status(const std::string& peer,
+                            const std::string& state,
+                            const std::string& phase,
+                            int ttl_ms,
+                            const std::string& chat_type,
+                            const std::string& group_user_id,
+                            const std::string& group_address,
+                            const std::string& group_name,
+                            const std::string& seq) {
+  std::string normalized_peer = trim_copy(peer);
+  std::string normalized_state = lowercase(trim_copy(state));
+  if (normalized_peer.empty() || normalized_state.empty()) return false;
+
+  std::string normalized_chat_type = lowercase(trim_copy(chat_type));
+  bool is_group = normalized_chat_type == "group" || !trim_copy(group_address).empty() || !trim_copy(group_user_id).empty();
+  if (!is_group && normalized_chat_type.empty()) normalized_chat_type = "direct";
+  if (is_group) normalized_chat_type = "group";
+
+  int next_ttl_ms = ttl_ms > 0 ? ttl_ms : 12000;
+  if (next_ttl_ms > 120000) next_ttl_ms = 120000;
+
+  std::ostringstream payload;
+  payload << "{";
+  payload << "\"type\":\"agent_status\",";
+  payload << "\"version\":1,";
+  payload << "\"chat_type\":\"" << json_escape(normalized_chat_type) << "\",";
+  payload << "\"source\":\"beagle_sidecar\",";
+  if (is_group) {
+    payload << "\"group\":{";
+    bool wrote = false;
+    if (!group_user_id.empty()) {
+      payload << "\"userid\":\"" << json_escape(group_user_id) << "\"";
+      wrote = true;
+    }
+    if (!group_address.empty()) {
+      if (wrote) payload << ",";
+      payload << "\"address\":\"" << json_escape(group_address) << "\"";
+      wrote = true;
+    }
+    if (!group_name.empty()) {
+      if (wrote) payload << ",";
+      payload << "\"name\":\"" << json_escape(group_name) << "\"";
+    }
+    payload << "},";
+  }
+  payload << "\"status\":{";
+  payload << "\"state\":\"" << json_escape(normalized_state) << "\"";
+  if (!phase.empty()) payload << ",\"phase\":\"" << json_escape(phase) << "\"";
+  payload << ",\"ttl_ms\":" << next_ttl_ms;
+  if (!seq.empty()) payload << ",\"seq\":\"" << json_escape(seq) << "\"";
+  payload << ",\"ts\":" << static_cast<long long>(std::time(nullptr));
+  payload << "}}";
+
+  const std::string prefix = is_group ? "CGS1 " : "BGS1 ";
+  std::string wire_payload = prefix + payload.str();
+  log_line(std::string("[beagle-sdk] send_status peer=") + normalized_peer
+           + " state=" + normalized_state
+           + " chat_type=" + normalized_chat_type
+           + " ttl_ms=" + std::to_string(next_ttl_ms));
+  return send_text(normalized_peer, wire_payload);
+}
+
 bool BeagleSdk::send_media(const std::string& peer,
                            const std::string& caption,
                            const std::string& media_path,

@@ -107,8 +107,9 @@ See `packages/beagle-channel/README.md` for full plugin documentation.
 
 ## Notes
 
-- The sidecar provides a minimal localhost API: `/health`, `/sendText`, `/sendMedia`, `/events`.
+- The sidecar provides a localhost API: `/health`, `/status`, `/sendText`, `/sendMedia`, `/sendStatus`, `/events`.
 - The SDK wiring is stubbed but structured so you can drop in the real SDK quickly.
 - `packages/beagle-channel` supports CarrierGroup envelopes:
   - inbound `CGP1` -> group context mapping
   - outbound group replies as `CGR1`
+  - outbound transient status as `CGS1` (group) or `BGS1` (DM)

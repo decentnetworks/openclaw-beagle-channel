@@ -56,6 +56,7 @@ Restart OpenClaw after installing.
 - Text messages
 - Media (images/files) via `sendMedia`
 - Group-context replies encoded as `CGR1` envelope back to CarrierGroup
+- Agent status signaling via sidecar `sendStatus` (`CGS1` for group, `BGS1` for DM)
 
 ## Development
 

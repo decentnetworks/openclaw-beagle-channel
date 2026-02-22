@@ -181,6 +181,14 @@ When enabled, the sidecar creates/uses:
 ## HTTP API
 
 - `GET /health` -> `{ "ok": true }`
+- `GET /status` -> sidecar runtime status snapshot
 - `POST /sendText` `{ "peer": "...", "text": "..." }`
 - `POST /sendMedia` `{ "peer": "...", "caption": "...", "mediaPath": "..." }`
+- `POST /sendStatus` `{ "peer":"...", "state":"typing|thinking|tool|sending|idle|error", "ttlMs":12000, "chatType":"direct|group", "groupUserId":"...", "groupAddress":"...", "groupName":"...", "phase":"...", "seq":"..." }`
 - `GET /events` -> `[{"peer":"...","text":"..."}]`
+
+Status transport details:
+
+- sidecar emits `BGS1 <json>` for DM status
+- sidecar emits `CGS1 <json>` for group status
+- these are transient control envelopes intended for client typing/thinking indicators

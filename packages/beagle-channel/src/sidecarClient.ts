@@ -35,9 +35,22 @@ export type SendMediaRequest = {
   filename?: string;
 };
 
+export type SendStatusRequest = {
+  peer: string;
+  state: "typing" | "thinking" | "tool" | "sending" | "idle" | "error";
+  phase?: string;
+  ttlMs?: number;
+  chatType?: "direct" | "group";
+  groupUserId?: string;
+  groupAddress?: string;
+  groupName?: string;
+  seq?: string;
+};
+
 export type SidecarClient = {
   sendText(req: SendTextRequest): Promise<void>;
   sendMedia(req: SendMediaRequest): Promise<void>;
+  sendStatus(req: SendStatusRequest): Promise<void>;
   pollEvents(signal: AbortSignal): Promise<SidecarEvent[]>;
 };
 
@@ -71,6 +84,12 @@ export function createSidecarClient(account: BeagleAccount): SidecarClient {
     },
     async sendMedia(req) {
       await request("/sendMedia", {
+        method: "POST",
+        body: JSON.stringify(req)
+      });
+    },
+    async sendStatus(req) {
+      await request("/sendStatus", {
         method: "POST",
         body: JSON.stringify(req)
       });

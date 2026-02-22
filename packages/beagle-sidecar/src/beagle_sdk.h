@@ -45,6 +45,15 @@ public:
                   const std::string& media_type,
                   const std::string& filename,
                   const std::string& out_format = "");
+  bool send_status(const std::string& peer,
+                   const std::string& state,
+                   const std::string& phase,
+                   int ttl_ms,
+                   const std::string& chat_type,
+                   const std::string& group_user_id,
+                   const std::string& group_address,
+                   const std::string& group_name,
+                   const std::string& seq);
 
   const std::string& userid() const { return user_id_; }
   const std::string& address() const { return address_; }
