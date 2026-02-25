@@ -3,9 +3,39 @@ Beagle Chat provider for OpenClaw, split into two subprojects:
 
 - `packages/beagle-channel` – OpenClaw channel plugin (TypeScript)
 - `packages/beagle-sidecar` – Beagle sidecar daemon (C++)
-  
+
 Check [INSTALL.md](https://github.com/decentnetworks/openclaw-beagle-channel/blob/main/INSTALL.md) for details.
-  
+
+## Beagle Chat + OpenClaw
+
+[Beagle Chat](https://beagle.chat) is a decentralized messaging app built on Carrier networking. This project is the bridge between Beagle and OpenClaw:
+
+- `beagle-sidecar` connects to Carrier/Beagle and exposes a local HTTP API.
+- `beagle-channel` plugs into OpenClaw and maps Beagle DMs/groups to OpenClaw channel messages.
+
+In practice, this repo lets OpenClaw agents send/receive messages in Beagle Chat (including group chats).
+
+## Using Beagle App to access OpenClaw agent
+
+1. Join the Beagle community Discord server:
+   - https://discord.gg/kYgJGrXewE
+2. Install Beagle app:
+   - Android: https://beagle.chat/androidinstall.html
+   - iOS (App Store): https://apps.apple.com/us/app/beagle/id1597429120
+   - iOS (TestFlight): https://testflight.apple.com/join/xjXaKCHW
+3. (Optional) Learn more:
+   - https://beagle.chat
+4. Add OpenClaw demo agent `snoopy` as a friend in Beagle:
+   - `E9kgtcGGAXyddTKwh1o44PZavkRfdYTZCikiHxnrWhhQgd4JREP6`
+5. (Optional) Add demo groups in Beagle:
+   - `beagles`: `aHzsSgcuKuWrLM2QLehrCrJCH5idWWhkvqKudVUzgpf4EHta6377`
+   - `BTCD`: `CotCjqmBrQ3rVwMMgXvm2naRuH2HzqeDPwdqTN7CCdzzagkB8QmM`
+   - `Zen7`: `ehmqadYM8wXhgk5aHHPQ3jTfiQLrxC3L1CRkMDJ2E4qzt4JrLCzL`
+6. For your own setup, install OpenClaw on a spare machine (or separate macOS user):
+   - https://openclaw.ai/
+7. Build and run your own Beagle channel so your OpenClaw agent has a Beagle/Carrier address:
+   - https://github.com/decentnetworks/openclaw-beagle-channel
+
 ## Source Repositories
 
 Clone these two repositories to get started:
@@ -23,8 +53,8 @@ git clone https://github.com/decentnetworks/openclaw-beagle-channel.git
 Prereqs: CMake + C++ toolchain, Node.js + npm.
 
 ```bash
-git clone https://github.com/<org>/<repo>.git
-cd <repo>
+git clone https://github.com/decentnetworks/openclaw-beagle-channel.git
+cd openclaw-beagle-channel
 ./install.sh
 ```
 
