@@ -806,12 +806,17 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
     };
 
     let deliveredCount = 0;
+    let dispatchTimedOut = false;
     const deliveredFingerprints = new Set<string>();
     const dispatchPromise = core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg: api?.config ?? {},
       dispatcherOptions: {
         deliver: async (payload: any, info: any) => {
+          if (dispatchTimedOut) {
+            api?.logger?.warn?.("[beagle] suppress outbound payload after timeout");
+            return;
+          }
           deliveredCount += 1;
           if (info?.kind === "final") await sendStatus("sending", "final", true);
           const text = payload?.text ?? "";
@@ -888,16 +893,55 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       }
     });
     const env = (globalThis as any)?.process?.env ?? {};
-    const timeoutMs = Number(env.BEAGLE_DISPATCH_TIMEOUT_MS || 30000);
+    const timeoutMs = Number(env.BEAGLE_DISPATCH_TIMEOUT_MS || 90000);
     const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`dispatch timeout after ${timeoutMs}ms`)), timeoutMs)
+      setTimeout(() => {
+        dispatchTimedOut = true;
+        reject(new Error(`dispatch timeout after ${timeoutMs}ms`));
+      }, timeoutMs)
     );
+    const extractDispatchResultText = (result: any): string => {
+      const pickFirst = (...values: any[]): string => {
+        for (const value of values) {
+          if (typeof value === "string" && value.trim()) return value.trim();
+        }
+        return "";
+      };
+      const outputTextItems = Array.isArray(result?.response?.output)
+        ? result.response.output
+            .flatMap((item: any) => (Array.isArray(item?.content) ? item.content : []))
+            .map((content: any) => (content?.type === "output_text" ? String(content?.text ?? "") : ""))
+            .filter(Boolean)
+        : [];
+      return pickFirst(
+        result?.finalText,
+        result?.replyText,
+        result?.text,
+        result?.content,
+        result?.final?.text,
+        result?.final?.content,
+        result?.response?.output_text,
+        outputTextItems.join("\n")
+      );
+    };
     let queuedFinal: any;
     try {
       const result: any = await Promise.race([dispatchPromise, timeoutPromise]);
       queuedFinal = result?.queuedFinal;
       api?.logger?.info?.(`[beagle] dispatch queuedFinal=${queuedFinal} duration_ms=${Date.now() - dispatchStart}`);
       if (queuedFinal !== true && deliveredCount === 0) {
+        const recoveredText = extractDispatchResultText(result);
+        if (recoveredText) {
+          const replyText = isGroup
+            ? buildCarrierGroupReplyText(recoveredText, parsedGroup as ParsedGroupInbound)
+            : recoveredText;
+          api?.logger?.warn?.(
+            `[beagle] dispatch ended without queued final; recovered text from result len=${recoveredText.length}`
+          );
+          await client.sendText({ peer: normalizedPeerId, text: replyText });
+          await sendStatus("idle", "recovered_result_text", true);
+          return;
+        }
         const fallbackText = isGroup
           ? buildCarrierGroupReplyText(
               "I received your message but did not produce a final reply. Please resend.",
