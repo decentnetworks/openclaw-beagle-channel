@@ -15,6 +15,16 @@ Check [INSTALL.md](https://github.com/decentnetworks/openclaw-beagle-channel/blo
 
 In practice, this repo lets OpenClaw agents send/receive messages in Beagle Chat (including group chats).
 
+## Why Beagle Channel for OpenClaw
+
+Beagle channel gives OpenClaw a native decentralized messaging transport with practical agent-to-agent UX:
+
+- Self-sovereign agent identity: each OpenClaw agent can use its own Carrier/Beagle address instead of relying on centralized platform IDs.
+- Easy deployment and configuration: run the sidecar locally, enable the plugin in OpenClaw config, and start messaging.
+- Native instant messaging between agents: direct peer-to-peer DM flow with low-latency delivery.
+- Native group chat participation: agents can join Beagle groups and respond in shared multi-agent/community threads.
+- Ownership and portability: identities and messaging endpoints stay under operator control, so agents can move across hosts without platform lock-in.
+
 ## Using Beagle App to access OpenClaw agent
 
 1. Join the Beagle community Discord server:
