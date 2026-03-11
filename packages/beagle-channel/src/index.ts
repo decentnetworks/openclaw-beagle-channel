@@ -8,7 +8,10 @@ const { isAbsolute, resolve, join, basename } = require("path");
 const INBOUND_SEEN_MAX = 10_000;
 const inboundSeen = new Set<string>();
 const inboundSeenOrder: string[] = [];
+const subscriptionFanoutSeen = new Set<string>();
+const subscriptionFanoutSeenOrder: string[] = [];
 const inboundPollControllers = new Map<string, AbortController>();
+const discordSubscriptionPollControllers = new Map<string, AbortController>();
 const CARRIER_GROUP_MESSAGE_PREFIX = "CGP1 ";
 const CARRIER_GROUP_REPLY_PREFIX = "CGR1 ";
 const CARRIER_GROUP_STATUS_PREFIX = "CGS1 ";
@@ -82,6 +85,10 @@ type SubscriptionRecord = {
   chatType: "dm" | "group";
   channelId: string;
   channelName?: string;
+  deliveryPeerId?: string;
+  groupUserId?: string;
+  groupAddress?: string;
+  groupName?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -89,6 +96,27 @@ type SubscriptionRecord = {
 type SubscriptionStore = {
   version: number;
   records: SubscriptionRecord[];
+};
+
+type DiscordMessageAuthor = {
+  id?: string;
+  username?: string;
+  global_name?: string;
+};
+
+type DiscordMessageAttachment = {
+  filename?: string;
+  content_type?: string;
+  url?: string;
+};
+
+type DiscordChannelMessage = {
+  id?: string;
+  channel_id?: string;
+  content?: string;
+  timestamp?: string;
+  author?: DiscordMessageAuthor;
+  attachments?: DiscordMessageAttachment[];
 };
 
 function envTruthy(value: any) {
@@ -342,8 +370,11 @@ function loadSubscriptionStore(): SubscriptionStore {
     const raw = readFileSync(path, "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return { version: 1, records: [] };
-    const records = Array.isArray((parsed as any).records) ? (parsed as any).records : [];
-    return { version: 1, records };
+    const rawRecords = Array.isArray((parsed as any).records) ? (parsed as any).records : [];
+    const records = rawRecords
+      .map((record: any) => normalizeSubscriptionRecord(record))
+      .filter(Boolean) as SubscriptionRecord[];
+    return { version: 2, records };
   } catch {
     return { version: 1, records: [] };
   }
@@ -352,7 +383,32 @@ function loadSubscriptionStore(): SubscriptionStore {
 function saveSubscriptionStore(store: SubscriptionStore) {
   const path = resolveSubscriptionStorePath();
   mkdirSync(require("path").dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(store, null, 2));
+  writeFileSync(path, JSON.stringify({ version: 2, records: store.records.map((record) => normalizeSubscriptionRecord(record)).filter(Boolean) }, null, 2));
+}
+
+function normalizeSubscriptionRecord(record: any): SubscriptionRecord | null {
+  if (!record || typeof record !== "object") return null;
+  const accountId = String(record.accountId ?? "").trim() || "default";
+  const channelId = String(record.channelId ?? "").trim();
+  const peerId = normalizePeerId(record.peerId);
+  const deliveryPeerId = normalizePeerId(record.deliveryPeerId ?? record.peerId);
+  const chatType = String(record.chatType ?? "dm").trim().toLowerCase() === "group" ? "group" : "dm";
+  if (!channelId || !peerId || !deliveryPeerId) return null;
+  const createdAt = String(record.createdAt ?? "").trim() || new Date().toISOString();
+  const updatedAt = String(record.updatedAt ?? "").trim() || createdAt;
+  return {
+    accountId,
+    peerId,
+    deliveryPeerId,
+    chatType,
+    channelId,
+    channelName: String(record.channelName ?? "").trim() || undefined,
+    groupUserId: String(record.groupUserId ?? "").trim() || undefined,
+    groupAddress: String(record.groupAddress ?? "").trim() || undefined,
+    groupName: String(record.groupName ?? "").trim() || undefined,
+    createdAt,
+    updatedAt
+  };
 }
 
 function parseSubscribableChannels(account: BeagleAccount): SubscribableChannel[] {
@@ -379,7 +435,17 @@ function findChannelByQuery(channels: SubscribableChannel[], query: string) {
   return channels.find((c) => c.id.toLowerCase() === q) || channels.find((c) => String(c.name || "").toLowerCase() === q) || channels.find((c) => String(c.name || "").toLowerCase().includes(q)) || null;
 }
 
-function maybeHandleLocalSubscriptionCommand(params: { accountId: string; account: BeagleAccount; peerId: string; isGroup: boolean; body: string; }): string | null {
+function maybeHandleLocalSubscriptionCommand(params: {
+  accountId: string;
+  account: BeagleAccount;
+  peerId: string;
+  deliveryPeerId: string;
+  isGroup: boolean;
+  groupUserId?: string;
+  groupAddress?: string;
+  groupName?: string;
+  body: string;
+}): string | null {
   const body = String(params.body || "").trim();
   if (!body.startsWith("/")) return null;
   const channels = parseSubscribableChannels(params.account);
@@ -398,9 +464,31 @@ function maybeHandleLocalSubscriptionCommand(params: { accountId: string; accoun
     const store = loadSubscriptionStore();
     const now = new Date().toISOString();
     const peerId = normalizePeerId(params.peerId);
+    const deliveryPeerId = normalizePeerId(params.deliveryPeerId);
     const existing = store.records.find((r: any) => r.accountId === params.accountId && r.peerId === peerId && r.channelId === ch.id);
-    if (existing) { existing.updatedAt = now; saveSubscriptionStore(store); return "Already subscribed: " + (ch.name || ch.id); }
-    store.records.push({ accountId: params.accountId, peerId, chatType: params.isGroup ? "group" : "dm", channelId: ch.id, channelName: ch.name, createdAt: now, updatedAt: now });
+    if (existing) {
+      existing.updatedAt = now;
+      existing.chatType = params.isGroup ? "group" : "dm";
+      existing.deliveryPeerId = deliveryPeerId || existing.deliveryPeerId || existing.peerId;
+      existing.groupUserId = params.groupUserId || existing.groupUserId;
+      existing.groupAddress = params.groupAddress || existing.groupAddress;
+      existing.groupName = params.groupName || existing.groupName;
+      saveSubscriptionStore(store);
+      return "Already subscribed: " + (ch.name || ch.id);
+    }
+    store.records.push({
+      accountId: params.accountId,
+      peerId,
+      deliveryPeerId: deliveryPeerId || peerId,
+      chatType: params.isGroup ? "group" : "dm",
+      channelId: ch.id,
+      channelName: ch.name,
+      groupUserId: params.groupUserId,
+      groupAddress: params.groupAddress,
+      groupName: params.groupName,
+      createdAt: now,
+      updatedAt: now
+    });
     saveSubscriptionStore(store);
     return "Subscribed: " + (ch.name || ch.id);
   }
@@ -468,6 +556,223 @@ function rememberInboundSignature(signature: string) {
     if (oldest) inboundSeen.delete(oldest);
   }
   return true;
+}
+
+function rememberSubscriptionFanoutSignature(signature: string) {
+  if (subscriptionFanoutSeen.has(signature)) return false;
+  subscriptionFanoutSeen.add(signature);
+  subscriptionFanoutSeenOrder.push(signature);
+  if (subscriptionFanoutSeenOrder.length > INBOUND_SEEN_MAX) {
+    const oldest = subscriptionFanoutSeenOrder.shift();
+    if (oldest) subscriptionFanoutSeen.delete(oldest);
+  }
+  return true;
+}
+
+function abortDiscordSubscriptionPoller(key = "default", controller?: AbortController) {
+  const active = discordSubscriptionPollControllers.get(key);
+  if (!active) return;
+  if (controller && active !== controller) return;
+  active.abort();
+  discordSubscriptionPollControllers.delete(key);
+}
+
+function abortDiscordSubscriptionPollers() {
+  for (const controller of discordSubscriptionPollControllers.values()) controller.abort();
+  discordSubscriptionPollControllers.clear();
+}
+
+async function sendBeagleSubscriptionText(params: {
+  client: any;
+  record: SubscriptionRecord;
+  text: string;
+}) {
+  const text = String(params.text ?? "").trim();
+  const deliveryPeerId = normalizePeerId(params.record.deliveryPeerId ?? params.record.peerId);
+  if (!text || !deliveryPeerId) return;
+  if (
+    params.record.chatType === "group" &&
+    params.record.groupAddress &&
+    params.record.groupUserId
+  ) {
+    const groupReply = buildCarrierGroupReplyText(text, {
+      envelope: {},
+      groupUserId: params.record.groupUserId,
+      groupAddress: params.record.groupAddress,
+      groupNickname: params.record.groupName || params.record.channelName || "",
+      originUserId: "",
+      originNickname: "",
+      messageText: text
+    });
+    await params.client.sendText({ peer: deliveryPeerId, text: groupReply });
+    return;
+  }
+  await params.client.sendText({ peer: deliveryPeerId, text });
+}
+
+function summarizeDiscordAttachments(attachments: DiscordMessageAttachment[] | undefined) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return "";
+  const names = attachments
+    .map((entry: any) => String(entry?.name ?? entry?.filename ?? "").trim())
+    .filter(Boolean);
+  if (!names.length) return `${attachments.length} attachment${attachments.length === 1 ? "" : "s"}`;
+  return names.join(", ");
+}
+
+function formatDiscordSubscriptionForward(params: {
+  message: DiscordChannelMessage;
+  channelName?: string;
+}) {
+  const sender =
+    String(
+      params.message?.author?.global_name ||
+        params.message?.author?.username ||
+        params.message?.author?.id ||
+        ""
+    ).trim() || "unknown";
+  const channelName = String(
+    params.channelName || "discord"
+  ).trim();
+  const body = normalizeInboundText(params.message?.content ?? "");
+  const attachmentSummary = summarizeDiscordAttachments(params.message?.attachments);
+  const content = body || (attachmentSummary ? `[Attachment] ${attachmentSummary}` : "");
+  if (!content) return "";
+  return `[Discord ${channelName}] ${sender}: ${content}`;
+}
+
+function snowflakeCompare(a: string, b: string) {
+  try {
+    const av = BigInt(String(a || "0"));
+    const bv = BigInt(String(b || "0"));
+    if (av === bv) return 0;
+    return av > bv ? 1 : -1;
+  } catch {
+    return String(a || "").localeCompare(String(b || ""));
+  }
+}
+
+function resolveDiscordBotToken(cfg: any) {
+  const account = cfg?.channels?.discord?.accounts?.default;
+  return String(account?.token || cfg?.channels?.discord?.token || process.env.DISCORD_BOT_TOKEN || "").trim();
+}
+
+async function discordApiJson(path: string, token: string, signal?: AbortSignal) {
+  const res = await fetch(`https://discord.com/api/v10${path}`, {
+    method: "GET",
+    signal,
+    headers: {
+      authorization: `Bot ${token}`,
+      "content-type": "application/json"
+    }
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`discord api ${path} failed: ${res.status} ${body}`);
+  }
+  return res.json();
+}
+
+async function relayDiscordChannelMessage(api: any, message: DiscordChannelMessage, records: SubscriptionRecord[]) {
+  const channelId = String(message.channel_id || "").trim();
+  const formatted = formatDiscordSubscriptionForward({
+    message,
+    channelName: records.find((record) => record.channelName)?.channelName
+  });
+  if (!channelId || !formatted) return;
+  const signature = [
+    channelId,
+    String(message.id || "(no-msgid)"),
+    String(message.timestamp || ""),
+    normalizeInboundText(message.content || "")
+  ].join("|");
+  if (!rememberSubscriptionFanoutSignature(signature)) return;
+
+  const clients = new Map<string, any>();
+  for (const record of records) {
+    const account = resolveAccount(api?.config ?? {}, record.accountId);
+    const clientKey = `${record.accountId}:${account.sidecarBaseUrl}:${account.authToken || ""}`;
+    let client = clients.get(clientKey);
+    if (!client) {
+      client = createSidecarClient(account);
+      clients.set(clientKey, client);
+    }
+    try {
+      await sendBeagleSubscriptionText({ client, record, text: formatted });
+      api?.logger?.info?.(
+        `[beagle] subscription fanout delivered channel=${channelId} peer=${record.deliveryPeerId || record.peerId}`
+      );
+    } catch (err: any) {
+      api?.logger?.warn?.(
+        `[beagle] subscription fanout failed channel=${channelId} peer=${record.deliveryPeerId || record.peerId}: ${String(err)}`
+      );
+    }
+  }
+}
+
+async function runDiscordSubscriptionPollLoop(api: any, abortSignal: AbortSignal, log?: any) {
+  const pollerKey = "default";
+  abortDiscordSubscriptionPoller(pollerKey);
+  const externalController = new AbortController();
+  const relayAbort = () => externalController.abort();
+  abortSignal.addEventListener("abort", relayAbort, { once: true });
+  discordSubscriptionPollControllers.set(pollerKey, externalController);
+
+  const lastSeenByChannel = new Map<string, string>();
+
+  try {
+    while (!externalController.signal.aborted) {
+      try {
+        const cfg = api?.config ?? {};
+        const token = resolveDiscordBotToken(cfg);
+        if (!token) {
+          log?.warn?.("[beagle] discord subscription relay disabled: missing Discord bot token");
+          await sleep(5000);
+          continue;
+        }
+
+        const store = loadSubscriptionStore();
+        const subscribedChannelIds = [...new Set(store.records.map((record) => String(record.channelId || "").trim()).filter(Boolean))];
+        if (!subscribedChannelIds.length) {
+          await sleep(3000);
+          continue;
+        }
+
+        for (const channelId of subscribedChannelIds) {
+          const channelRecords = store.records.filter((record) => record.channelId === channelId);
+          if (!channelRecords.length) continue;
+          const lastSeen = lastSeenByChannel.get(channelId);
+          const query = lastSeen
+            ? `/channels/${channelId}/messages?after=${encodeURIComponent(lastSeen)}&limit=100`
+            : `/channels/${channelId}/messages?limit=20`;
+          const messages = (await discordApiJson(query, token, externalController.signal)) as DiscordChannelMessage[];
+          if (!Array.isArray(messages) || !messages.length) continue;
+
+          const ordered = [...messages].sort((a, b) => snowflakeCompare(String(a.id || ""), String(b.id || "")));
+          if (!lastSeen) {
+            const newestId = ordered[ordered.length - 1]?.id;
+            if (newestId) lastSeenByChannel.set(channelId, String(newestId));
+            continue;
+          }
+
+          for (const message of ordered) {
+            const messageId = String(message?.id || "").trim();
+            if (!messageId) continue;
+            await relayDiscordChannelMessage(api, { ...message, channel_id: channelId }, channelRecords);
+            lastSeenByChannel.set(channelId, messageId);
+          }
+        }
+      } catch (err: any) {
+        if (externalController.signal.aborted) break;
+        log?.warn?.(`[beagle] discord subscription poll failed; retrying: ${String(err)}`);
+        await sleep(2000);
+      }
+
+      await sleep(2500);
+    }
+  } finally {
+    abortSignal.removeEventListener("abort", relayAbort);
+    abortDiscordSubscriptionPoller(pollerKey, externalController);
+  }
 }
 
 function abortInboundPoller(accountId: string, controller?: AbortController) {
@@ -653,6 +958,18 @@ export default function register(api: any) {
   };
 
   api.registerChannel({ plugin: channelPlugin });
+  api.registerService({
+    id: "beagle-discord-subscription-relay",
+    start: async () => {
+      const controller = new AbortController();
+      discordSubscriptionPollControllers.set("service", controller);
+      void runDiscordSubscriptionPollLoop(api, controller.signal, api?.logger);
+    },
+    stop: async () => {
+      abortDiscordSubscriptionPoller("service");
+      abortDiscordSubscriptionPollers();
+    }
+  });
 }
 
 function resolveAccount(cfg: any, accountId?: string): BeagleAccount {
@@ -784,10 +1101,35 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       : "";
     const body = parsedGroup?.messageText || rawBody || mediaHint;
 
-    const localCommandReply = maybeHandleLocalSubscriptionCommand({ accountId, account, peerId: conversationId, isGroup, body });
+    const localCommandReply = maybeHandleLocalSubscriptionCommand({
+      accountId,
+      account,
+      peerId: conversationId,
+      deliveryPeerId: normalizedPeerId,
+      isGroup,
+      groupUserId: parsedGroup?.groupUserId,
+      groupAddress: parsedGroup?.groupAddress,
+      groupName: parsedGroup?.groupNickname,
+      body
+    });
     if (localCommandReply) {
       const client = createSidecarClient(account);
-      await client.sendText({ peer: normalizePeerId(conversationId), text: localCommandReply });
+      await sendBeagleSubscriptionText({
+        client,
+        record: normalizeSubscriptionRecord({
+          accountId,
+          peerId: conversationId,
+          deliveryPeerId: normalizedPeerId,
+          chatType: isGroup ? "group" : "dm",
+          channelId: "__local__",
+          groupUserId: parsedGroup?.groupUserId,
+          groupAddress: parsedGroup?.groupAddress,
+          groupName: parsedGroup?.groupNickname,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }) as SubscriptionRecord,
+        text: localCommandReply
+      });
       return;
     }
     const groupMetaNote = isGroup

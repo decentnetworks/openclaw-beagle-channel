@@ -89,6 +89,13 @@ This plugin now supports lightweight local subscription commands via Beagle DM/g
 - `/unsubscribe <channel-id-or-name>`
 - `/subscriptions` (or `/subs`)
 
+When a subscribed Discord channel receives a new inbound message, the plugin forwards that post to all matching Beagle subscribers. Group subscriptions are delivered back through the CarrierGroup reply envelope path, and DM subscriptions are delivered as direct Beagle messages.
+
+Implementation note:
+- The working relay uses a background Discord REST poller inside the Beagle plugin.
+- This is intentional: OpenClaw's `message_received` hook only sees messages that already entered the agent dispatch path, which misses ordinary channel traffic.
+- Bot-authored Discord replies are also relayed, so agent responses in subscribed channels reach Beagle subscribers.
+
 ### Configure channel discovery
 
 Set `subscribableChannels` under your Beagle account config:
@@ -117,3 +124,10 @@ Subscriptions are persisted to:
 
 Override path with:
 - `BEAGLE_SUBSCRIPTION_STORE_PATH=/custom/path/subscriptions.json`
+
+Store format notes:
+- `version: 2` records include `deliveryPeerId` for actual Beagle delivery.
+- Group subscriptions also persist `groupUserId` and `groupAddress` so Discord fanout can be sent back into the original Beagle group.
+
+See:
+- `docs/BEAGLE_DISCORD_SUBSCRIPTION_RELAY.md`

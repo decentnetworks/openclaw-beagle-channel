@@ -1,0 +1,19 @@
+Completed handoff summary:
+
+done: /channels, /subscribe, /unsubscribe, /subscriptions
+done: subscription persistence file at ~/.openclaw/workspace/memory/beagle-channel-subscriptions.json
+done: sidecar build/run + Beagle channel wiring
+done: Discord -> Beagle subscription relay for subscribed channels
+done: relay includes both human Discord messages and bot / agent replies
+
+Final implementation:
+- plugin file: packages/beagle-channel/src/index.ts
+- note: docs/BEAGLE_DISCORD_SUBSCRIPTION_RELAY.md
+
+Important implementation detail:
+- OpenClaw plugin hook `message_received` was not sufficient because it only fires after inbound messages enter agent dispatch.
+- Final fix uses a background Discord REST poller scoped to subscribed channel ids.
+
+Verified behavior on this box:
+- subscribed Beagle iOS client receives subscribed Discord channel posts
+- subscribed Beagle iOS client receives subscribed Discord bot replies
