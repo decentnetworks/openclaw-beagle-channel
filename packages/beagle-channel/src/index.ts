@@ -1,6 +1,7 @@
 import { createSidecarClient, type BeagleAccount } from "./sidecarClient.js";
 declare const require: any;
 declare const process: any;
+const { Buffer } = require("buffer");
 const { existsSync } = require("fs");
 const { readdirSync, statSync, mkdirSync, readFileSync, writeFileSync } = require("fs");
 const { isAbsolute, resolve, join, basename } = require("path");
@@ -108,6 +109,7 @@ type DiscordMessageAttachment = {
   filename?: string;
   content_type?: string;
   url?: string;
+  proxy_url?: string;
 };
 
 type DiscordChannelMessage = {
@@ -610,6 +612,38 @@ async function sendBeagleSubscriptionText(params: {
   await params.client.sendText({ peer: deliveryPeerId, text });
 }
 
+async function sendBeagleSubscriptionMedia(params: {
+  client: any;
+  record: SubscriptionRecord;
+  caption?: string;
+  mediaPath: string;
+  mediaType?: string;
+  filename?: string;
+}) {
+  const deliveryPeerId = normalizePeerId(params.record.deliveryPeerId ?? params.record.peerId);
+  if (!deliveryPeerId || !params.mediaPath) return;
+  if (params.record.chatType === "group") {
+    // Group text relay is implemented through CGR1. Group media forwarding needs
+    // a separate CarrierGroup-compatible media envelope, so fail safe to text.
+    const fallback = `${params.caption || ""}\n[Attachment] ${params.filename || "file"}`.trim();
+    if (fallback) {
+      await sendBeagleSubscriptionText({
+        client: params.client,
+        record: params.record,
+        text: fallback
+      });
+    }
+    return;
+  }
+  await params.client.sendMedia({
+    peer: deliveryPeerId,
+    caption: params.caption || "",
+    mediaPath: params.mediaPath,
+    mediaType: params.mediaType,
+    filename: params.filename
+  });
+}
+
 function summarizeDiscordAttachments(attachments: DiscordMessageAttachment[] | undefined) {
   if (!Array.isArray(attachments) || attachments.length === 0) return "";
   const names = attachments
@@ -637,7 +671,23 @@ function formatDiscordSubscriptionForward(params: {
   const attachmentSummary = summarizeDiscordAttachments(params.message?.attachments);
   const content = body || (attachmentSummary ? `[Attachment] ${attachmentSummary}` : "");
   if (!content) return "";
-  return `[Discord ${channelName}] ${sender}: ${content}`;
+  return `[${channelName}] ${sender}: ${content}`;
+}
+
+function formatDiscordSubscriptionCaption(params: {
+  message: DiscordChannelMessage;
+  channelName?: string;
+}) {
+  const sender =
+    String(
+      params.message?.author?.global_name ||
+        params.message?.author?.username ||
+        params.message?.author?.id ||
+        ""
+    ).trim() || "unknown";
+  const channelName = String(params.channelName || "discord").trim();
+  const body = normalizeInboundText(params.message?.content ?? "");
+  return body ? `[${channelName}] ${sender}: ${body}` : `[${channelName}] ${sender}`;
 }
 
 function snowflakeCompare(a: string, b: string) {
@@ -672,13 +722,41 @@ async function discordApiJson(path: string, token: string, signal?: AbortSignal)
   return res.json();
 }
 
-async function relayDiscordChannelMessage(api: any, message: DiscordChannelMessage, records: SubscriptionRecord[]) {
+async function downloadDiscordAttachmentToLocal(api: any, token: string, attachment: DiscordMessageAttachment) {
+  const url = String(attachment?.url || attachment?.proxy_url || "").trim();
+  if (!url) return null;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      authorization: `Bot ${token}`
+    }
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`discord attachment fetch failed: ${res.status} ${body}`);
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const contentType = String(attachment?.content_type || res.headers.get("content-type") || "").trim() || undefined;
+  const originalFilename = String(attachment?.filename || "").trim() || undefined;
+  const saveMediaBuffer = api?.runtime?.channel?.media?.saveMediaBuffer;
+  if (typeof saveMediaBuffer !== "function") {
+    throw new Error("runtime media saver unavailable");
+  }
+  const saved = await saveMediaBuffer(buffer, contentType, "inbound", buffer.byteLength + 1024, originalFilename);
+  return {
+    path: String(saved?.path || "").trim(),
+    mediaType: contentType,
+    filename: originalFilename
+  };
+}
+
+async function relayDiscordChannelMessage(api: any, token: string, message: DiscordChannelMessage, records: SubscriptionRecord[]) {
   const channelId = String(message.channel_id || "").trim();
   const formatted = formatDiscordSubscriptionForward({
     message,
     channelName: records.find((record) => record.channelName)?.channelName
   });
-  if (!channelId || !formatted) return;
+  if (!channelId) return;
   const signature = [
     channelId,
     String(message.id || "(no-msgid)"),
@@ -688,6 +766,10 @@ async function relayDiscordChannelMessage(api: any, message: DiscordChannelMessa
   if (!rememberSubscriptionFanoutSignature(signature)) return;
 
   const clients = new Map<string, any>();
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  const hasDownloadableAttachments = attachments.some((attachment) =>
+    Boolean(String(attachment?.url || attachment?.proxy_url || "").trim())
+  );
   for (const record of records) {
     const account = resolveAccount(api?.config ?? {}, record.accountId);
     const clientKey = `${record.accountId}:${account.sidecarBaseUrl}:${account.authToken || ""}`;
@@ -697,10 +779,37 @@ async function relayDiscordChannelMessage(api: any, message: DiscordChannelMessa
       clients.set(clientKey, client);
     }
     try {
-      await sendBeagleSubscriptionText({ client, record, text: formatted });
-      api?.logger?.info?.(
-        `[beagle] subscription fanout delivered channel=${channelId} peer=${record.deliveryPeerId || record.peerId}`
-      );
+      let deliveredMedia = false;
+      if (hasDownloadableAttachments) {
+        const caption = formatDiscordSubscriptionCaption({
+          message,
+          channelName: record.channelName
+        });
+        let firstAttachment = true;
+        for (const attachment of attachments) {
+          const downloaded = await downloadDiscordAttachmentToLocal(api, token, attachment);
+          if (!downloaded?.path) continue;
+          await sendBeagleSubscriptionMedia({
+            client,
+            record,
+            caption: firstAttachment ? caption : "",
+            mediaPath: downloaded.path,
+            mediaType: downloaded.mediaType,
+            filename: downloaded.filename
+          });
+          firstAttachment = false;
+          deliveredMedia = true;
+          api?.logger?.info?.(
+            `[beagle] subscription fanout sendMedia channel=${channelId} peer=${record.deliveryPeerId || record.peerId} file=${downloaded.filename || "(unnamed)"}`
+          );
+        }
+      }
+      if (!deliveredMedia && formatted) {
+        await sendBeagleSubscriptionText({ client, record, text: formatted });
+        api?.logger?.info?.(
+          `[beagle] subscription fanout delivered channel=${channelId} peer=${record.deliveryPeerId || record.peerId}`
+        );
+      }
     } catch (err: any) {
       api?.logger?.warn?.(
         `[beagle] subscription fanout failed channel=${channelId} peer=${record.deliveryPeerId || record.peerId}: ${String(err)}`
@@ -757,7 +866,7 @@ async function runDiscordSubscriptionPollLoop(api: any, abortSignal: AbortSignal
           for (const message of ordered) {
             const messageId = String(message?.id || "").trim();
             if (!messageId) continue;
-            await relayDiscordChannelMessage(api, { ...message, channel_id: channelId }, channelRecords);
+            await relayDiscordChannelMessage(api, token, { ...message, channel_id: channelId }, channelRecords);
             lastSeenByChannel.set(channelId, messageId);
           }
         }
