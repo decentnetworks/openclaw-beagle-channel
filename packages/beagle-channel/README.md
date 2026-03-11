@@ -79,3 +79,41 @@ npm run build
 - Useful logs:
   - `journalctl --user -u openclaw-gateway.service -f`
   - `journalctl --user -u beagle-sidecar.service -f`
+
+## Channel Subscription Commands (BIP-006 bootstrap)
+
+This plugin now supports lightweight local subscription commands via Beagle DM/group chat:
+
+- `/channels` (or `/discover`) — list available channels
+- `/subscribe <channel-id-or-name>`
+- `/unsubscribe <channel-id-or-name>`
+- `/subscriptions` (or `/subs`)
+
+### Configure channel discovery
+
+Set `subscribableChannels` under your Beagle account config:
+
+```json
+{
+  "channels": {
+    "beagle": {
+      "accounts": {
+        "default": {
+          "subscribableChannels": [
+            { "id": "1476753578482995334", "name": "#beagle", "description": "BIP discussions" },
+            { "id": "1475346350596947979", "name": "#verify", "description": "verification flow" }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+### Local storage
+
+Subscriptions are persisted to:
+- `~/.openclaw/workspace/memory/beagle-channel-subscriptions.json`
+
+Override path with:
+- `BEAGLE_SUBSCRIPTION_STORE_PATH=/custom/path/subscriptions.json`

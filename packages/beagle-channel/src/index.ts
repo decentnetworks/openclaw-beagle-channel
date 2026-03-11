@@ -2,7 +2,7 @@ import { createSidecarClient, type BeagleAccount } from "./sidecarClient.js";
 declare const require: any;
 declare const process: any;
 const { existsSync } = require("fs");
-const { readdirSync, statSync } = require("fs");
+const { readdirSync, statSync, mkdirSync, readFileSync, writeFileSync } = require("fs");
 const { isAbsolute, resolve, join, basename } = require("path");
 
 const INBOUND_SEEN_MAX = 10_000;
@@ -13,6 +13,7 @@ const CARRIER_GROUP_MESSAGE_PREFIX = "CGP1 ";
 const CARRIER_GROUP_REPLY_PREFIX = "CGR1 ";
 const CARRIER_GROUP_STATUS_PREFIX = "CGS1 ";
 const BEAGLE_STATUS_PREFIX = "BGS1 ";
+const SUBS_STORE_PATH_DEFAULT = "~/.openclaw/workspace/memory/beagle-channel-subscriptions.json";
 
 type CarrierGroupInboundEnvelope = {
   type?: string;
@@ -68,6 +69,27 @@ type ParsedGroupInbound = {
 };
 
 type AgentStatusState = "typing" | "thinking" | "tool" | "sending" | "idle" | "error";
+
+type SubscribableChannel = {
+  id: string;
+  name?: string;
+  description?: string;
+};
+
+type SubscriptionRecord = {
+  accountId: string;
+  peerId: string;
+  chatType: "dm" | "group";
+  channelId: string;
+  channelName?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type SubscriptionStore = {
+  version: number;
+  records: SubscriptionRecord[];
+};
 
 function envTruthy(value: any) {
   const text = String(value ?? "").trim().toLowerCase();
@@ -308,6 +330,97 @@ function resolveDefaultReplyImagePath() {
   return "";
 }
 
+function resolveSubscriptionStorePath() {
+  const configured = String(process.env.BEAGLE_SUBSCRIPTION_STORE_PATH || "").trim();
+  return resolveLocalMediaPath(configured || SUBS_STORE_PATH_DEFAULT);
+}
+
+function loadSubscriptionStore(): SubscriptionStore {
+  const path = resolveSubscriptionStorePath();
+  try {
+    if (!existsSync(path)) return { version: 1, records: [] };
+    const raw = readFileSync(path, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return { version: 1, records: [] };
+    const records = Array.isArray((parsed as any).records) ? (parsed as any).records : [];
+    return { version: 1, records };
+  } catch {
+    return { version: 1, records: [] };
+  }
+}
+
+function saveSubscriptionStore(store: SubscriptionStore) {
+  const path = resolveSubscriptionStorePath();
+  mkdirSync(require("path").dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(store, null, 2));
+}
+
+function parseSubscribableChannels(account: BeagleAccount): SubscribableChannel[] {
+  const raw = (account as any)?.subscribableChannels;
+  if (!Array.isArray(raw)) return [];
+  const out: SubscribableChannel[] = [];
+  for (const item of raw) {
+    if (!item) continue;
+    if (typeof item === "string") {
+      const id = item.trim();
+      if (id) out.push({ id, name: id });
+      continue;
+    }
+    const id = String((item as any).id ?? "").trim();
+    if (!id) continue;
+    out.push({ id, name: String((item as any).name ?? "").trim() || undefined, description: String((item as any).description ?? "").trim() || undefined });
+  }
+  return out;
+}
+
+function findChannelByQuery(channels: SubscribableChannel[], query: string) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return null;
+  return channels.find((c) => c.id.toLowerCase() === q) || channels.find((c) => String(c.name || "").toLowerCase() === q) || channels.find((c) => String(c.name || "").toLowerCase().includes(q)) || null;
+}
+
+function maybeHandleLocalSubscriptionCommand(params: { accountId: string; account: BeagleAccount; peerId: string; isGroup: boolean; body: string; }): string | null {
+  const body = String(params.body || "").trim();
+  if (!body.startsWith("/")) return null;
+  const channels = parseSubscribableChannels(params.account);
+  const parts = body.split(/\s+/);
+  const cmd = String(parts.shift() || "").toLowerCase();
+  const arg = parts.join(" ").trim();
+  if (cmd === "/channels" || cmd === "/discover") {
+    if (!channels.length) return "No channels configured yet. Ask admin to set subscribableChannels.";
+    const lines = channels.map((c, i) => String(i + 1) + ". " + (c.name || c.id) + " (" + c.id + ")" + (c.description ? " - " + c.description : ""));
+    return "Available channels:\n" + lines.join("\n") + "\n\nUse: /subscribe <channel-id-or-name>";
+  }
+  if (cmd === "/subscribe") {
+    if (!arg) return "Usage: /subscribe <channel-id-or-name>";
+    const ch = findChannelByQuery(channels, arg);
+    if (!ch) return "Channel not found. Use /channels to see available options.";
+    const store = loadSubscriptionStore();
+    const now = new Date().toISOString();
+    const peerId = normalizePeerId(params.peerId);
+    const existing = store.records.find((r: any) => r.accountId === params.accountId && r.peerId === peerId && r.channelId === ch.id);
+    if (existing) { existing.updatedAt = now; saveSubscriptionStore(store); return "Already subscribed: " + (ch.name || ch.id); }
+    store.records.push({ accountId: params.accountId, peerId, chatType: params.isGroup ? "group" : "dm", channelId: ch.id, channelName: ch.name, createdAt: now, updatedAt: now });
+    saveSubscriptionStore(store);
+    return "Subscribed: " + (ch.name || ch.id);
+  }
+  if (cmd === "/unsubscribe") {
+    if (!arg) return "Usage: /unsubscribe <channel-id-or-name>";
+    const ch = findChannelByQuery(channels, arg) || { id: arg, name: arg };
+    const store = loadSubscriptionStore();
+    const peerId = normalizePeerId(params.peerId);
+    const next = store.records.filter((r: any) => !(r.accountId === params.accountId && r.peerId === peerId && r.channelId === ch.id));
+    if (next.length === store.records.length) return "No active subscription found for: " + (ch.name || ch.id);
+    store.records = next; saveSubscriptionStore(store); return "Unsubscribed: " + (ch.name || ch.id);
+  }
+  if (cmd === "/subscriptions" || cmd === "/subs") {
+    const store = loadSubscriptionStore(); const peerId = normalizePeerId(params.peerId);
+    const mine = store.records.filter((r: any) => r.accountId === params.accountId && r.peerId === peerId);
+    if (!mine.length) return "No subscriptions yet. Use /channels then /subscribe <channel>.";
+    return "Your subscriptions:\n" + mine.map((r: any, i: number) => String(i + 1) + ". " + (r.channelName || r.channelId) + " (" + r.channelId + ")").join("\n");
+  }
+  return null;
+}
 function coerceMediaInput(mediaPath: any, mediaUrl: any) {
   let nextMediaPath = String(mediaPath ?? "").trim();
   let nextMediaUrl = String(mediaUrl ?? "").trim();
@@ -670,6 +783,13 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       ? `Image attached${inboundFilename ? `: ${inboundFilename}` : ""}.`
       : "";
     const body = parsedGroup?.messageText || rawBody || mediaHint;
+
+    const localCommandReply = maybeHandleLocalSubscriptionCommand({ accountId, account, peerId: conversationId, isGroup, body });
+    if (localCommandReply) {
+      const client = createSidecarClient(account);
+      await client.sendText({ peer: normalizePeerId(conversationId), text: localCommandReply });
+      return;
+    }
     const groupMetaNote = isGroup
       ? `\n[Beagle group context]\n` +
         `ChatType: group\n` +
