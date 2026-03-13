@@ -640,7 +640,10 @@ async function sendBeagleSubscriptionMedia(params: {
     caption: params.caption || "",
     mediaPath: params.mediaPath,
     mediaType: params.mediaType,
-    filename: params.filename
+    filename: params.filename,
+    // iOS subscribers have been observed to miss auto->packed fallback payloads.
+    // Request the Swift file-model JSON path explicitly for Discord subscription media.
+    outFormat: "swift-json"
   });
 }
 

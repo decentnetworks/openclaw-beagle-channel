@@ -26,6 +26,13 @@ The Beagle plugin now runs its own background relay service:
 - delivers DM subscriptions as direct Beagle messages
 - delivers group subscriptions as `CGR1` CarrierGroup reply envelopes
 
+For Discord attachment fanout to Beagle DM subscribers, the relay now explicitly requests
+sidecar media `outFormat: "swift-json"` instead of relying on sidecar `auto` mode.
+Reason: in live testing on March 11, 2026, `auto` fell back from Carrier file-transfer
+to `packed` payloads, and subscribed iOS Beagle clients received the surrounding text
+messages but did not render the packed image payload. For subscription media, `swift-json`
+restored successful image delivery on iOS.
+
 Implementation lives in:
 
 - `packages/beagle-channel/src/index.ts`
@@ -51,6 +58,7 @@ Working verification on this host:
 
 - subscribed Beagle iOS client received Discord user messages from subscribed channels
 - subscribed Beagle iOS client received Discord bot / agent replies from subscribed channels
+- subscribed Beagle iOS client received Discord subscription images after switching relay media output to `swift-json`
 - direct Beagle delivery path was confirmed independently with a relay-debug message
 
 ### Useful Logs
@@ -64,5 +72,6 @@ Working verification on this host:
 Look for:
 
 - `subscription fanout delivered`
+- `subscription fanout sendMedia`
 - `subscription fanout failed`
 - `discord subscription poll failed`

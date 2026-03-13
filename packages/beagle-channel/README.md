@@ -91,6 +91,8 @@ This plugin now supports lightweight local subscription commands via Beagle DM/g
 
 When a subscribed Discord channel receives a new inbound message, the plugin forwards that post to all matching Beagle subscribers. Group subscriptions are delivered back through the CarrierGroup reply envelope path, and DM subscriptions are delivered as direct Beagle messages.
 
+Discord attachment fanout to DM subscribers uses sidecar media `outFormat: "swift-json"` for iOS compatibility. In live testing on March 11, 2026, sidecar `auto` mode could fall back to `packed` media payloads after file-transfer timeout, and iOS subscribers did not render those images reliably.
+
 Implementation note:
 - The working relay uses a background Discord REST poller inside the Beagle plugin.
 - This is intentional: OpenClaw's `message_received` hook only sees messages that already entered the agent dispatch path, which misses ordinary channel traffic.
