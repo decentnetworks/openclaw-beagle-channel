@@ -830,6 +830,8 @@ async function runDiscordSubscriptionPollLoop(api: any, abortSignal: AbortSignal
   discordSubscriptionPollControllers.set(pollerKey, externalController);
 
   const lastSeenByChannel = new Map<string, string>();
+  const channelFailureCount = new Map<string, number>();
+  const channelRetryAfterAt = new Map<string, number>();
 
   try {
     while (!externalController.signal.aborted) {
@@ -852,25 +854,42 @@ async function runDiscordSubscriptionPollLoop(api: any, abortSignal: AbortSignal
         for (const channelId of subscribedChannelIds) {
           const channelRecords = store.records.filter((record) => record.channelId === channelId);
           if (!channelRecords.length) continue;
-          const lastSeen = lastSeenByChannel.get(channelId);
-          const query = lastSeen
-            ? `/channels/${channelId}/messages?after=${encodeURIComponent(lastSeen)}&limit=100`
-            : `/channels/${channelId}/messages?limit=20`;
-          const messages = (await discordApiJson(query, token, externalController.signal)) as DiscordChannelMessage[];
-          if (!Array.isArray(messages) || !messages.length) continue;
-
-          const ordered = [...messages].sort((a, b) => snowflakeCompare(String(a.id || ""), String(b.id || "")));
-          if (!lastSeen) {
-            const newestId = ordered[ordered.length - 1]?.id;
-            if (newestId) lastSeenByChannel.set(channelId, String(newestId));
+          const retryAfterAt = channelRetryAfterAt.get(channelId) ?? 0;
+          if (retryAfterAt > Date.now()) {
             continue;
           }
+          try {
+            const lastSeen = lastSeenByChannel.get(channelId);
+            const query = lastSeen
+              ? `/channels/${channelId}/messages?after=${encodeURIComponent(lastSeen)}&limit=100`
+              : `/channels/${channelId}/messages?limit=20`;
+            const messages = (await discordApiJson(query, token, externalController.signal)) as DiscordChannelMessage[];
+            channelFailureCount.delete(channelId);
+            channelRetryAfterAt.delete(channelId);
+            if (!Array.isArray(messages) || !messages.length) continue;
 
-          for (const message of ordered) {
-            const messageId = String(message?.id || "").trim();
-            if (!messageId) continue;
-            await relayDiscordChannelMessage(api, token, { ...message, channel_id: channelId }, channelRecords);
-            lastSeenByChannel.set(channelId, messageId);
+            const ordered = [...messages].sort((a, b) => snowflakeCompare(String(a.id || ""), String(b.id || "")));
+            if (!lastSeen) {
+              const newestId = ordered[ordered.length - 1]?.id;
+              if (newestId) lastSeenByChannel.set(channelId, String(newestId));
+              continue;
+            }
+
+            for (const message of ordered) {
+              const messageId = String(message?.id || "").trim();
+              if (!messageId) continue;
+              await relayDiscordChannelMessage(api, token, { ...message, channel_id: channelId }, channelRecords);
+              lastSeenByChannel.set(channelId, messageId);
+            }
+          } catch (err: any) {
+            if (externalController.signal.aborted) break;
+            const failures = (channelFailureCount.get(channelId) ?? 0) + 1;
+            channelFailureCount.set(channelId, failures);
+            const backoffMs = Math.min(60000, 2000 * Math.max(1, failures));
+            channelRetryAfterAt.set(channelId, Date.now() + backoffMs);
+            log?.warn?.(
+              `[beagle] discord subscription channel poll failed channel=${channelId} failures=${failures} retry_ms=${backoffMs}: ${String(err)}`
+            );
           }
         }
       } catch (err: any) {
@@ -939,13 +958,28 @@ async function runInboundPollLoop({
     }
   };
 
+  const pollTimeoutMs = Math.max(
+    3000,
+    Number(process.env.BEAGLE_INBOUND_POLL_TIMEOUT_MS || 15000)
+  );
+  const heartbeatMs = Math.max(
+    10000,
+    Number(process.env.BEAGLE_INBOUND_POLL_HEARTBEAT_MS || 60000)
+  );
+  let lastPollOkAt = Date.now();
+  let lastHeartbeatAt = 0;
+  let consecutivePollFailures = 0;
+
   try {
     while (!controller.signal.aborted) {
       const requestController = new AbortController();
       const relayRequestAbort = () => requestController.abort();
       controller.signal.addEventListener("abort", relayRequestAbort, { once: true });
+      const pollTimeout = globalThis.setTimeout(() => requestController.abort(), pollTimeoutMs);
       try {
         const events = await client.pollEvents(requestController.signal);
+        consecutivePollFailures = 0;
+        lastPollOkAt = Date.now();
         safeSetStatus({
           accountId,
           connected: true,
@@ -966,9 +1000,19 @@ async function runInboundPollLoop({
             lastInboundAt: Date.now()
           });
         }
+        if (events.length === 0 && Date.now() - lastHeartbeatAt >= heartbeatMs) {
+          lastHeartbeatAt = Date.now();
+          log?.info?.(
+            `[beagle] inbound poll heartbeat account=${accountId} idle_ms=${Date.now() - lastPollOkAt}`
+          );
+        }
       } catch (err: any) {
         if (controller.signal.aborted) break;
-        const msg = err?.message ?? String(err);
+        consecutivePollFailures += 1;
+        const timedOut = requestController.signal.aborted && !controller.signal.aborted;
+        const msg = timedOut
+          ? `poll timeout after ${pollTimeoutMs}ms`
+          : (err?.message ?? String(err));
         safeWarn(`[${accountId}] beagle sidecar poll failed; retrying: ${msg}`);
         safeSetStatus({
           accountId,
@@ -979,8 +1023,14 @@ async function runInboundPollLoop({
             error: msg
           }
         });
+        if (timedOut || consecutivePollFailures >= 3) {
+          log?.warn?.(
+            `[beagle] inbound poll recovery account=${accountId} failures=${consecutivePollFailures} last_ok_ms=${Date.now() - lastPollOkAt}`
+          );
+        }
         await sleep(1000);
       } finally {
+        globalThis.clearTimeout(pollTimeout);
         controller.signal.removeEventListener("abort", relayRequestAbort);
       }
     }
