@@ -9,9 +9,24 @@ usage() {
   cat <<'EOF'
 Usage:
   ./start.sh run
+  ./start.sh --start-service
+  ./start.sh --stop-service
+  ./start.sh --install-service
+  ./start.sh --uninstall-service
+  ./start.sh --restart-service
+  ./start.sh --status-service
+  ./start.sh --start-systemd-user
+  ./start.sh --stop-systemd-user
   ./start.sh --install-systemd-user
   ./start.sh --uninstall-systemd-user
+  ./start.sh --restart-systemd-user
   ./start.sh --status-systemd-user
+  ./start.sh --start-launchd-user
+  ./start.sh --stop-launchd-user
+  ./start.sh --install-launchd-user
+  ./start.sh --uninstall-launchd-user
+  ./start.sh --restart-launchd-user
+  ./start.sh --status-launchd-user
 
 Environment:
   BEAGLE_SDK_ROOT            Required. SDK root containing config/carrier.conf
@@ -20,6 +35,21 @@ Environment:
   BEAGLE_SIDECAR_TOKEN       Optional bearer token
   BEAGLE_SIDECAR_EXTRA_ARGS  Optional extra args (space-separated)
 EOF
+}
+
+service_setup_script() {
+  case "$(uname -s)" in
+    Linux)
+      printf '%s/scripts/setup-systemd-user.sh' "$REPO_DIR"
+      ;;
+    Darwin)
+      printf '%s/scripts/setup-launchd-user.sh' "$REPO_DIR"
+      ;;
+    *)
+      echo "Unsupported OS for background service setup: $(uname -s)." >&2
+      exit 1
+      ;;
+  esac
 }
 
 resolve_sdk_root() {
@@ -68,14 +98,59 @@ case "$cmd" in
     export LD_LIBRARY_PATH="${BEAGLE_SDK_ROOT}/build/linux/src/carrier:${BEAGLE_SDK_ROOT}/build/linux/src/session:${BEAGLE_SDK_ROOT}/build/linux/src/filetransfer:${BEAGLE_SDK_ROOT}/build/linux/intermediates/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     exec "$BIN" "${ARGS[@]}"
     ;;
+  --start-service)
+    "$(service_setup_script)" start
+    ;;
+  --stop-service)
+    "$(service_setup_script)" stop
+    ;;
+  --install-service)
+    "$(service_setup_script)" install
+    ;;
+  --uninstall-service)
+    "$(service_setup_script)" uninstall
+    ;;
+  --restart-service)
+    "$(service_setup_script)" restart
+    ;;
+  --status-service)
+    "$(service_setup_script)" status
+    ;;
+  --start-systemd-user)
+    "$(service_setup_script)" start
+    ;;
+  --stop-systemd-user)
+    "$(service_setup_script)" stop
+    ;;
   --install-systemd-user)
-    "$REPO_DIR/scripts/setup-systemd-user.sh" install
+    "$(service_setup_script)" install
     ;;
   --uninstall-systemd-user)
-    "$REPO_DIR/scripts/setup-systemd-user.sh" uninstall
+    "$(service_setup_script)" uninstall
+    ;;
+  --restart-systemd-user)
+    "$(service_setup_script)" restart
     ;;
   --status-systemd-user)
-    "$REPO_DIR/scripts/setup-systemd-user.sh" status
+    "$(service_setup_script)" status
+    ;;
+  --start-launchd-user)
+    "$REPO_DIR/scripts/setup-launchd-user.sh" start
+    ;;
+  --stop-launchd-user)
+    "$REPO_DIR/scripts/setup-launchd-user.sh" stop
+    ;;
+  --install-launchd-user)
+    "$REPO_DIR/scripts/setup-launchd-user.sh" install
+    ;;
+  --uninstall-launchd-user)
+    "$REPO_DIR/scripts/setup-launchd-user.sh" uninstall
+    ;;
+  --restart-launchd-user)
+    "$REPO_DIR/scripts/setup-launchd-user.sh" restart
+    ;;
+  --status-launchd-user)
+    "$REPO_DIR/scripts/setup-launchd-user.sh" status
     ;;
   -h|--help)
     usage
