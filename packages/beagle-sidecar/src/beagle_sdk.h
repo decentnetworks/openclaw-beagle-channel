@@ -20,6 +20,14 @@ using BeagleIncomingCallback = std::function<void(const BeagleIncomingMessage&)>
 struct BeagleSdkOptions {
   std::string config_path;
   std::string data_dir;
+  std::string account_id;
+  std::string profile_name;
+  std::string profile_gender;
+  std::string profile_phone;
+  std::string profile_email;
+  std::string profile_description;
+  std::string profile_region;
+  std::string openclaw_agent_id;
 };
 
 struct BeagleStatus {
@@ -34,6 +42,13 @@ struct BeagleStatus {
 
 class BeagleSdk {
 public:
+  BeagleSdk();
+  ~BeagleSdk();
+  BeagleSdk(const BeagleSdk&) = delete;
+  BeagleSdk& operator=(const BeagleSdk&) = delete;
+  BeagleSdk(BeagleSdk&&) = delete;
+  BeagleSdk& operator=(BeagleSdk&&) = delete;
+
   bool start(const BeagleSdkOptions& options, BeagleIncomingCallback on_incoming);
   void stop();
 
@@ -62,4 +77,5 @@ public:
 private:
   std::string user_id_;
   std::string address_;
+  void* state_ = nullptr;
 };

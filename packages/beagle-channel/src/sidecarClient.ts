@@ -57,7 +57,8 @@ export type SidecarClient = {
 export function createSidecarClient(account: BeagleAccount): SidecarClient {
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const headers: Record<string, string> = {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "x-beagle-account": String(account.accountId || "default")
     };
     if (account.authToken) headers.authorization = `Bearer ${account.authToken}`;
 

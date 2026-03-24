@@ -24,6 +24,38 @@ This package provides a Beagle Chat channel plugin for OpenClaw. It connects to 
 }
 ```
 
+Multi-agent note:
+
+- Define one `accounts.<id>` entry per OpenClaw agent.
+- The plugin sends `X-Beagle-Account: <accountId>` on every sidecar request automatically.
+- Route each conversation to the correct `accountId` via your OpenClaw channel routing rules.
+
+Example (`main` + `beagle-profile`):
+
+```json
+{
+  "channels": {
+    "beagle": {
+      "accounts": {
+        "main": {
+          "enabled": true,
+          "sidecarBaseUrl": "http://127.0.0.1:39091",
+          "authToken": "devtoken"
+        },
+        "beagle-profile": {
+          "enabled": true,
+          "sidecarBaseUrl": "http://127.0.0.1:39091",
+          "authToken": "devtoken"
+        }
+      }
+    }
+  }
+}
+```
+
+Then keep OpenClaw bindings/routing rules aligned so `accountId=main` routes to agent `main`,
+and `accountId=beagle-profile` routes to agent `beagle-profile`.
+
 Add the plugin entry so OpenClaw loads the extension:
 
 ```json

@@ -9,14 +9,20 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <initializer_list>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 struct Event {
+  std::string account_id;
   std::string peer;
   std::string text;
   std::string media_url;
@@ -26,6 +32,24 @@ struct Event {
   unsigned long long size = 0;
   std::string msg_id;
   long long ts = 0;
+};
+
+struct AgentProfile {
+  std::string account_id;
+  std::string agent_id;
+  std::string name;
+  std::string gender;
+  std::string phone;
+  std::string email;
+  std::string description;
+  std::string region;
+};
+
+struct AccountRuntime {
+  std::string account_id;
+  std::string agent_id;
+  std::string agent_name;
+  std::unique_ptr<BeagleSdk> sdk;
 };
 
 static std::string log_ts() {
@@ -171,6 +195,294 @@ static std::string json_escape(const std::string& in) {
   return out;
 }
 
+static std::string trim_copy(const std::string& s) {
+  size_t b = 0;
+  while (b < s.size() && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+  size_t e = s.size();
+  while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+  return s.substr(b, e - b);
+}
+
+static std::string lowercase_copy(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return s;
+}
+
+static std::string get_env(const char* key) {
+  const char* value = std::getenv(key);
+  return value ? std::string(value) : std::string();
+}
+
+static bool file_exists(const std::string& path) {
+  return access(path.c_str(), R_OK) == 0;
+}
+
+static std::string expand_home(const std::string& path) {
+  if (path.empty() || path[0] != '~') return path;
+  const std::string home = get_env("HOME");
+  if (home.empty()) return path;
+  if (path.size() == 1) return home;
+  if (path[1] == '/') return home + path.substr(1);
+  return path;
+}
+
+static std::string sanitize_account_id(const std::string& raw) {
+  std::string in = trim_copy(raw);
+  if (in.empty()) return "";
+  std::string out;
+  out.reserve(in.size());
+  for (char c : in) {
+    if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.') {
+      out.push_back(c);
+    } else if (std::isspace(static_cast<unsigned char>(c)) || c == '/' || c == '\\' || c == ':') {
+      out.push_back('_');
+    }
+  }
+  while (!out.empty() && out.front() == '_') out.erase(out.begin());
+  while (!out.empty() && out.back() == '_') out.pop_back();
+  return out;
+}
+
+static bool read_file_to_string(const std::string& path, std::string& out) {
+  std::ifstream in(path, std::ios::in | std::ios::binary);
+  if (!in) return false;
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  out = ss.str();
+  return true;
+}
+
+static size_t skip_json_ws(const std::string& body, size_t pos) {
+  while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) ++pos;
+  return pos;
+}
+
+static bool find_matching_json_bracket(const std::string& body,
+                                       size_t start,
+                                       char open_char,
+                                       char close_char,
+                                       size_t& end) {
+  if (start >= body.size() || body[start] != open_char) return false;
+  int depth = 0;
+  bool in_string = false;
+  bool escaped = false;
+  for (size_t i = start; i < body.size(); ++i) {
+    char c = body[i];
+    if (in_string) {
+      if (escaped) {
+        escaped = false;
+      } else if (c == '\\') {
+        escaped = true;
+      } else if (c == '"') {
+        in_string = false;
+      }
+      continue;
+    }
+    if (c == '"') {
+      in_string = true;
+      continue;
+    }
+    if (c == open_char) {
+      ++depth;
+      continue;
+    }
+    if (c == close_char) {
+      --depth;
+      if (depth == 0) {
+        end = i;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool extract_json_container_by_key(const std::string& body,
+                                          const std::string& key,
+                                          char open_char,
+                                          char close_char,
+                                          size_t& start,
+                                          size_t& end) {
+  const std::string needle = "\"" + key + "\"";
+  size_t key_pos = body.find(needle);
+  if (key_pos == std::string::npos) return false;
+  size_t colon = body.find(':', key_pos + needle.size());
+  if (colon == std::string::npos) return false;
+  size_t pos = skip_json_ws(body, colon + 1);
+  if (pos >= body.size() || body[pos] != open_char) return false;
+  if (!find_matching_json_bracket(body, pos, open_char, close_char, end)) return false;
+  start = pos;
+  return true;
+}
+
+static std::string extract_first_json_string(const std::string& body,
+                                             const std::initializer_list<const char*>& keys) {
+  for (const char* key : keys) {
+    std::string value;
+    if (key && extract_json_string(body, key, value) && !trim_copy(value).empty()) {
+      return trim_copy(value);
+    }
+  }
+  return "";
+}
+
+static AgentProfile parse_agent_profile_from_object(const std::string& object_body,
+                                                    const std::string& key_hint) {
+  AgentProfile profile;
+  profile.agent_id = extract_first_json_string(object_body, {"id", "agentId", "agent_id", "slug"});
+  if (profile.agent_id.empty()) profile.agent_id = key_hint;
+  profile.account_id = sanitize_account_id(profile.agent_id.empty() ? key_hint : profile.agent_id);
+  profile.name = extract_first_json_string(object_body, {"name", "displayName", "title"});
+  profile.gender = extract_first_json_string(object_body, {"gender"});
+  profile.phone = extract_first_json_string(object_body, {"phone"});
+  profile.email = extract_first_json_string(object_body, {"email"});
+  profile.description = extract_first_json_string(object_body, {"description", "bio", "summary"});
+  profile.region = extract_first_json_string(object_body, {"region", "location"});
+  if (profile.name.empty()) profile.name = profile.agent_id;
+  return profile;
+}
+
+static size_t skip_json_value(const std::string& body, size_t pos) {
+  pos = skip_json_ws(body, pos);
+  if (pos >= body.size()) return std::string::npos;
+  char c = body[pos];
+  if (c == '"') {
+    std::string ignored;
+    size_t end_pos = pos;
+    if (!decode_json_string(body, pos, ignored, end_pos)) return std::string::npos;
+    return end_pos + 1;
+  }
+  if (c == '{') {
+    size_t end = pos;
+    if (!find_matching_json_bracket(body, pos, '{', '}', end)) return std::string::npos;
+    return end + 1;
+  }
+  if (c == '[') {
+    size_t end = pos;
+    if (!find_matching_json_bracket(body, pos, '[', ']', end)) return std::string::npos;
+    return end + 1;
+  }
+  while (pos < body.size()) {
+    char ch = body[pos];
+    if (ch == ',' || ch == '}' || ch == ']') break;
+    ++pos;
+  }
+  return pos;
+}
+
+static void parse_agent_object_map(const std::string& object_body, std::vector<AgentProfile>& out) {
+  if (object_body.empty() || object_body.front() != '{') return;
+  size_t pos = 1;
+  while (pos < object_body.size()) {
+    pos = skip_json_ws(object_body, pos);
+    if (pos >= object_body.size() || object_body[pos] == '}') break;
+    if (object_body[pos] != '"') break;
+
+    std::string key;
+    size_t key_end = pos;
+    if (!decode_json_string(object_body, pos, key, key_end)) break;
+    pos = skip_json_ws(object_body, key_end + 1);
+    if (pos >= object_body.size() || object_body[pos] != ':') break;
+    ++pos;
+    pos = skip_json_ws(object_body, pos);
+    if (pos >= object_body.size()) break;
+
+    if (object_body[pos] == '{') {
+      size_t obj_end = pos;
+      if (!find_matching_json_bracket(object_body, pos, '{', '}', obj_end)) break;
+      AgentProfile profile = parse_agent_profile_from_object(
+          object_body.substr(pos, obj_end - pos + 1),
+          sanitize_account_id(key));
+      if (!profile.account_id.empty()) out.push_back(std::move(profile));
+      pos = obj_end + 1;
+    } else {
+      size_t next = skip_json_value(object_body, pos);
+      if (next == std::string::npos) break;
+      pos = next;
+    }
+
+    pos = skip_json_ws(object_body, pos);
+    if (pos < object_body.size() && object_body[pos] == ',') ++pos;
+  }
+}
+
+static void parse_agent_array(const std::string& array_body, std::vector<AgentProfile>& out) {
+  if (array_body.empty() || array_body.front() != '[') return;
+  size_t pos = 1;
+  while (pos < array_body.size()) {
+    pos = skip_json_ws(array_body, pos);
+    if (pos >= array_body.size() || array_body[pos] == ']') break;
+    if (array_body[pos] == '{') {
+      size_t obj_end = pos;
+      if (!find_matching_json_bracket(array_body, pos, '{', '}', obj_end)) break;
+      AgentProfile profile = parse_agent_profile_from_object(
+          array_body.substr(pos, obj_end - pos + 1), "");
+      if (!profile.account_id.empty()) out.push_back(std::move(profile));
+      pos = obj_end + 1;
+    } else {
+      size_t next = skip_json_value(array_body, pos);
+      if (next == std::string::npos) break;
+      pos = next;
+    }
+    pos = skip_json_ws(array_body, pos);
+    if (pos < array_body.size() && array_body[pos] == ',') ++pos;
+  }
+}
+
+static std::vector<AgentProfile> load_agent_profiles_from_openclaw_config(const std::string& config_path) {
+  std::vector<AgentProfile> profiles;
+  std::string body;
+  if (config_path.empty() || !read_file_to_string(config_path, body)) return profiles;
+
+  const char* section_keys[] = {"agents", "characters"};
+  for (const char* section_key : section_keys) {
+    size_t start = 0;
+    size_t end = 0;
+    if (extract_json_container_by_key(body, section_key, '{', '}', start, end)) {
+      std::string section_object = body.substr(start, end - start + 1);
+      if (std::string(section_key) == "agents") {
+        size_t list_start = 0;
+        size_t list_end = 0;
+        if (extract_json_container_by_key(section_object, "list", '[', ']', list_start, list_end)) {
+          parse_agent_array(section_object.substr(list_start, list_end - list_start + 1), profiles);
+        }
+      }
+      parse_agent_object_map(section_object, profiles);
+      continue;
+    }
+    if (extract_json_container_by_key(body, section_key, '[', ']', start, end)) {
+      parse_agent_array(body.substr(start, end - start + 1), profiles);
+    }
+  }
+
+  std::unordered_map<std::string, AgentProfile> deduped;
+  for (const auto& p : profiles) {
+    if (p.account_id.empty()) continue;
+    auto it = deduped.find(p.account_id);
+    if (it == deduped.end()) {
+      deduped.emplace(p.account_id, p);
+      continue;
+    }
+    if (it->second.name.empty() && !p.name.empty()) it->second.name = p.name;
+    if (it->second.description.empty() && !p.description.empty()) it->second.description = p.description;
+    if (it->second.gender.empty() && !p.gender.empty()) it->second.gender = p.gender;
+    if (it->second.phone.empty() && !p.phone.empty()) it->second.phone = p.phone;
+    if (it->second.email.empty() && !p.email.empty()) it->second.email = p.email;
+    if (it->second.region.empty() && !p.region.empty()) it->second.region = p.region;
+    if (it->second.agent_id.empty() && !p.agent_id.empty()) it->second.agent_id = p.agent_id;
+  }
+
+  std::vector<AgentProfile> out;
+  out.reserve(deduped.size());
+  for (const auto& kv : deduped) out.push_back(kv.second);
+  std::sort(out.begin(), out.end(), [](const AgentProfile& a, const AgentProfile& b) {
+    return a.account_id < b.account_id;
+  });
+  return out;
+}
+
 static std::string events_to_json(std::vector<Event> events) {
   std::ostringstream oss;
   oss << "[";
@@ -178,7 +490,8 @@ static std::string events_to_json(std::vector<Event> events) {
     const auto& ev = events[i];
     if (i) oss << ",";
     oss << "{"
-        << "\"peer\":\"" << json_escape(ev.peer) << "\"";
+        << "\"accountId\":\"" << json_escape(ev.account_id) << "\""
+        << ",\"peer\":\"" << json_escape(ev.peer) << "\"";
     if (!ev.text.empty()) oss << ",\"text\":\"" << json_escape(ev.text) << "\"";
     if (!ev.media_url.empty()) oss << ",\"mediaUrl\":\"" << json_escape(ev.media_url) << "\"";
     if (!ev.media_path.empty()) oss << ",\"mediaPath\":\"" << json_escape(ev.media_path) << "\"";
@@ -220,14 +533,24 @@ static int get_content_length(const std::string& headers) {
 }
 
 static std::string header_value(const std::string& headers, const std::string& key) {
-  std::string needle = key + ":";
-  size_t pos = headers.find(needle);
-  if (pos == std::string::npos) return "";
-  pos += needle.size();
-  while (pos < headers.size() && (headers[pos] == ' ' || headers[pos] == '\t')) pos++;
-  size_t end = headers.find("\r\n", pos);
-  if (end == std::string::npos) end = headers.size();
-  return headers.substr(pos, end - pos);
+  const std::string wanted = lowercase_copy(trim_copy(key));
+  if (wanted.empty()) return "";
+  size_t line_start = 0;
+  while (line_start < headers.size()) {
+    size_t line_end = headers.find("\r\n", line_start);
+    if (line_end == std::string::npos) line_end = headers.size();
+    if (line_end == line_start) break;
+    size_t colon = headers.find(':', line_start);
+    if (colon != std::string::npos && colon < line_end) {
+      std::string k = lowercase_copy(trim_copy(headers.substr(line_start, colon - line_start)));
+      if (k == wanted) {
+        return trim_copy(headers.substr(colon + 1, line_end - colon - 1));
+      }
+    }
+    if (line_end >= headers.size()) break;
+    line_start = line_end + 2;
+  }
+  return "";
 }
 
 static void send_response(int fd, int code, const std::string& content_type, const std::string& body) {
@@ -260,8 +583,9 @@ static std::string to_iso8601(long long ts) {
   return std::string(out);
 }
 
-static void push_event(const BeagleIncomingMessage& msg) {
+static void push_event(const std::string& account_id, const BeagleIncomingMessage& msg) {
   Event ev;
+  ev.account_id = account_id;
   ev.peer = msg.peer;
   ev.text = msg.text;
   ev.media_path = msg.media_path;
@@ -274,7 +598,8 @@ static void push_event(const BeagleIncomingMessage& msg) {
 
   std::lock_guard<std::mutex> lock(g_events_mu);
   g_events.push_back(std::move(ev));
-  log_line(std::string("[sidecar] queued event peer=") + msg.peer
+  log_line(std::string("[sidecar] queued event account=") + account_id
+           + " peer=" + msg.peer
            + " text_len=" + std::to_string(msg.text.size())
            + " ts=" + std::to_string(msg.ts));
 }
@@ -284,6 +609,7 @@ struct ServerOptions {
   std::string token;
   std::string data_dir = "./data";
   std::string config_path;
+  std::string openclaw_config_path;
 };
 
 static ServerOptions parse_args(int argc, char** argv) {
@@ -298,18 +624,11 @@ static ServerOptions parse_args(int argc, char** argv) {
       opts.data_dir = argv[++i];
     } else if (arg == "--config" && i + 1 < argc) {
       opts.config_path = argv[++i];
+    } else if (arg == "--openclaw-config" && i + 1 < argc) {
+      opts.openclaw_config_path = argv[++i];
     }
   }
   return opts;
-}
-
-static std::string get_env(const char* key) {
-  const char* value = std::getenv(key);
-  return value ? std::string(value) : std::string();
-}
-
-static bool file_exists(const std::string& path) {
-  return access(path.c_str(), R_OK) == 0;
 }
 
 static std::string resolve_config_path(const ServerOptions& opts) {
@@ -329,6 +648,34 @@ static std::string resolve_config_path(const ServerOptions& opts) {
   return std::string();
 }
 
+static std::string resolve_openclaw_config_path(const ServerOptions& opts) {
+  if (!opts.openclaw_config_path.empty()) return expand_home(opts.openclaw_config_path);
+  std::string env_path = get_env("BEAGLE_OPENCLAW_CONFIG");
+  if (env_path.empty()) env_path = get_env("OPENCLAW_CONFIG");
+  if (!env_path.empty()) return expand_home(env_path);
+  std::string home = get_env("HOME");
+  if (!home.empty()) {
+    std::string default_path = home + "/.openclaw/openclaw.json";
+    if (file_exists(default_path)) return default_path;
+  }
+  return "";
+}
+
+static std::string account_data_dir(const std::string& base_data_dir,
+                                    const std::string& account_id,
+                                    bool multi_account) {
+  if (!multi_account) return base_data_dir;
+  std::string cleaned = sanitize_account_id(account_id);
+  if (cleaned.empty()) cleaned = "default";
+  return base_data_dir + "/accounts/" + cleaned;
+}
+
+static std::string requested_account_id(const std::string& headers, const std::string& body) {
+  std::string account_id = trim_copy(header_value(headers, "X-Beagle-Account"));
+  if (account_id.empty()) extract_json_string(body, "accountId", account_id);
+  return sanitize_account_id(account_id);
+}
+
 int main(int argc, char** argv) {
   ServerOptions opts = parse_args(argc, argv);
   std::string config_path = resolve_config_path(opts);
@@ -337,10 +684,80 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  BeagleSdk sdk;
-  if (!sdk.start({config_path, opts.data_dir}, push_event)) {
-    log_line("Failed to start Beagle SDK");
+  std::string openclaw_config_path = resolve_openclaw_config_path(opts);
+  std::vector<AgentProfile> agent_profiles;
+  if (!openclaw_config_path.empty() && file_exists(openclaw_config_path)) {
+    agent_profiles = load_agent_profiles_from_openclaw_config(openclaw_config_path);
+    log_line(std::string("[sidecar] openclaw config=") + openclaw_config_path
+             + " discovered_agents=" + std::to_string(agent_profiles.size()));
+  }
+
+  if (agent_profiles.empty()) {
+    AgentProfile fallback;
+    fallback.account_id = "default";
+    fallback.agent_id = "default";
+    fallback.name = "Snoopy";
+    fallback.description = "OpenClaw Beagle agent";
+    fallback.region = "California";
+    agent_profiles.push_back(std::move(fallback));
+  }
+
+  const bool multi_account = agent_profiles.size() > 1;
+  std::map<std::string, std::unique_ptr<AccountRuntime>> accounts;
+  std::string default_account_id;
+
+  for (const auto& profile : agent_profiles) {
+    std::string account_id = sanitize_account_id(profile.account_id);
+    if (account_id.empty()) account_id = sanitize_account_id(profile.agent_id);
+    if (account_id.empty()) account_id = "default";
+    if (accounts.find(account_id) != accounts.end()) continue;
+
+    std::unique_ptr<AccountRuntime> runtime(new AccountRuntime());
+    runtime->account_id = account_id;
+    runtime->agent_id = profile.agent_id.empty() ? account_id : profile.agent_id;
+    runtime->agent_name = profile.name.empty() ? runtime->agent_id : profile.name;
+    runtime->sdk.reset(new BeagleSdk());
+
+    BeagleSdkOptions sdk_opts;
+    sdk_opts.config_path = config_path;
+    sdk_opts.data_dir = account_data_dir(opts.data_dir, account_id, multi_account);
+    sdk_opts.account_id = account_id;
+    sdk_opts.profile_name = runtime->agent_name;
+    sdk_opts.profile_gender = profile.gender;
+    sdk_opts.profile_phone = profile.phone;
+    sdk_opts.profile_email = profile.email;
+    sdk_opts.profile_description = profile.description;
+    sdk_opts.profile_region = profile.region;
+    sdk_opts.openclaw_agent_id = runtime->agent_id;
+
+    const std::string callback_account = account_id;
+    if (!runtime->sdk->start(sdk_opts, [callback_account](const BeagleIncomingMessage& msg) {
+          push_event(callback_account, msg);
+        })) {
+      log_line(std::string("Failed to start Beagle SDK account=") + account_id);
+      for (auto& kv : accounts) {
+        if (kv.second && kv.second->sdk) kv.second->sdk->stop();
+      }
+      return 1;
+    }
+
+    log_line(std::string("[sidecar] started account=") + account_id
+             + " agent=" + runtime->agent_id
+             + " user_id=" + runtime->sdk->userid()
+             + " address=" + runtime->sdk->address());
+    accounts.emplace(account_id, std::move(runtime));
+  }
+
+  if (accounts.empty()) {
+    log_line("Failed to start any Beagle account");
     return 1;
+  }
+  if (accounts.find("main") != accounts.end()) {
+    default_account_id = "main";
+  } else if (accounts.find("default") != accounts.end()) {
+    default_account_id = "default";
+  } else if (!accounts.empty()) {
+    default_account_id = accounts.begin()->first;
   }
 
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -368,6 +785,18 @@ int main(int argc, char** argv) {
   }
 
   log_line(std::string("Beagle sidecar listening on 0.0.0.0:") + std::to_string(opts.port));
+
+  auto resolve_account = [&](const std::string& wanted) -> AccountRuntime* {
+    if (!wanted.empty()) {
+      auto it = accounts.find(wanted);
+      if (it != accounts.end()) return it->second.get();
+      return nullptr;
+    }
+    auto it = accounts.find(default_account_id);
+    if (it != accounts.end()) return it->second.get();
+    if (!accounts.empty()) return accounts.begin()->second.get();
+    return nullptr;
+  };
 
   while (true) {
     int client_fd = accept(server_fd, nullptr, nullptr);
@@ -406,21 +835,53 @@ int main(int argc, char** argv) {
       }
     }
 
+    std::string wanted_account_id = requested_account_id(headers, body);
+    AccountRuntime* account = resolve_account(wanted_account_id);
+
     if (method == "GET" && path == "/health") {
+      if (!wanted_account_id.empty() && !account) {
+        send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"unknown_account\"}");
+        close(client_fd);
+        continue;
+      }
       std::ostringstream oss;
       oss << "{"
           << "\"ok\":true"
-          << ",\"userId\":\"" << json_escape(sdk.userid()) << "\""
-          << ",\"address\":\"" << json_escape(sdk.address()) << "\""
+          << ",\"requestedAccountId\":\"" << json_escape(account ? account->account_id : "") << "\""
+          << ",\"userId\":\"" << json_escape(account ? account->sdk->userid() : "") << "\""
+          << ",\"address\":\"" << json_escape(account ? account->sdk->address() : "") << "\""
+          << ",\"accounts\":[";
+      bool first = true;
+      for (const auto& kv : accounts) {
+        const AccountRuntime* runtime = kv.second.get();
+        if (!runtime || !runtime->sdk) continue;
+        if (!first) oss << ",";
+        first = false;
+        oss << "{"
+            << "\"accountId\":\"" << json_escape(runtime->account_id) << "\""
+            << ",\"agentId\":\"" << json_escape(runtime->agent_id) << "\""
+            << ",\"agentName\":\"" << json_escape(runtime->agent_name) << "\""
+            << ",\"userId\":\"" << json_escape(runtime->sdk->userid()) << "\""
+            << ",\"address\":\"" << json_escape(runtime->sdk->address()) << "\""
+            << "}";
+      }
+      oss << "]"
           << "}";
       send_response(client_fd, 200, "application/json", oss.str());
     } else if (method == "GET" && path == "/status") {
-      BeagleStatus status = sdk.status();
+      if (!account) {
+        send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"unknown_account\"}");
+        close(client_fd);
+        continue;
+      }
+      BeagleStatus status = account->sdk->status();
       std::string last_online_human = to_iso8601(status.last_online_ts);
       std::string last_offline_human = to_iso8601(status.last_offline_ts);
       std::ostringstream oss;
       oss << "{"
           << "\"ok\":true"
+          << ",\"accountId\":\"" << json_escape(account->account_id) << "\""
+          << ",\"agentId\":\"" << json_escape(account->agent_id) << "\""
           << ",\"ready\":" << (status.ready ? "true" : "false")
           << ",\"connected\":" << (status.connected ? "true" : "false")
           << ",\"lastPeer\":\"" << json_escape(status.last_peer) << "\""
@@ -433,31 +894,58 @@ int main(int argc, char** argv) {
           << "}";
       send_response(client_fd, 200, "application/json", oss.str());
     } else if (method == "GET" && path == "/events") {
+      if (!wanted_account_id.empty() && !account) {
+        send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"unknown_account\"}");
+        close(client_fd);
+        continue;
+      }
       std::vector<Event> events;
+      std::vector<Event> remaining;
+      const std::string selected_account = account ? account->account_id : "";
       {
         std::lock_guard<std::mutex> lock(g_events_mu);
-        events.swap(g_events);
+        remaining.reserve(g_events.size());
+        for (auto& ev : g_events) {
+          if (selected_account.empty() || ev.account_id == selected_account) {
+            events.push_back(std::move(ev));
+          } else {
+            remaining.push_back(std::move(ev));
+          }
+        }
+        g_events.swap(remaining);
       }
       if (!events.empty()) {
         std::string ua = header_value(headers, "User-Agent");
         std::ostringstream msg;
-        msg << "[sidecar] /events -> " << events.size() << " event(s)"
+        msg << "[sidecar] /events account=" << (selected_account.empty() ? "(all)" : selected_account)
+            << " -> " << events.size() << " event(s)"
             << " from " << client_ip(client_fd);
         if (!ua.empty()) msg << " ua=" << ua;
         log_line(msg.str());
       }
       send_response(client_fd, 200, "application/json", events_to_json(std::move(events)));
     } else if (method == "POST" && path == "/sendText") {
+      if (!account) {
+        send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"unknown_account\"}");
+        close(client_fd);
+        continue;
+      }
       std::string peer;
       std::string text;
       extract_json_string(body, "peer", peer);
       extract_json_string(body, "text", text);
-      log_line(std::string("[sidecar] /sendText peer=") + peer
+      log_line(std::string("[sidecar] /sendText account=") + account->account_id
+               + " peer=" + peer
                + " text_len=" + std::to_string(text.size()));
 
-      bool ok = sdk.send_text(peer, text);
+      bool ok = account->sdk->send_text(peer, text);
       send_response(client_fd, ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
     } else if (method == "POST" && path == "/sendMedia") {
+      if (!account) {
+        send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"unknown_account\"}");
+        close(client_fd);
+        continue;
+      }
       std::string peer;
       std::string caption;
       std::string media_path;
@@ -472,15 +960,21 @@ int main(int argc, char** argv) {
       extract_json_string(body, "mediaType", media_type);
       extract_json_string(body, "filename", filename);
       extract_json_string(body, "outFormat", out_format);
-      log_line(std::string("[sidecar] /sendMedia peer=") + peer
+      log_line(std::string("[sidecar] /sendMedia account=") + account->account_id
+               + " peer=" + peer
                + " caption_len=" + std::to_string(caption.size())
                + " media_url_len=" + std::to_string(media_url.size())
                + " media_path_len=" + std::to_string(media_path.size())
                + " out_format=" + (out_format.empty() ? "(default)" : out_format));
 
-      bool ok = sdk.send_media(peer, caption, media_path, media_url, media_type, filename, out_format);
+      bool ok = account->sdk->send_media(peer, caption, media_path, media_url, media_type, filename, out_format);
       send_response(client_fd, ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
     } else if (method == "POST" && path == "/sendStatus") {
+      if (!account) {
+        send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"unknown_account\"}");
+        close(client_fd);
+        continue;
+      }
       std::string peer;
       std::string state;
       std::string phase;
@@ -500,20 +994,21 @@ int main(int argc, char** argv) {
       extract_json_string(body, "seq", seq);
       int parsed_ttl = 0;
       if (extract_json_int(body, "ttlMs", parsed_ttl) && parsed_ttl > 0) ttl_ms = parsed_ttl;
-      log_line(std::string("[sidecar] /sendStatus peer=") + peer
+      log_line(std::string("[sidecar] /sendStatus account=") + account->account_id
+               + " peer=" + peer
                + " state=" + state
                + " phase=" + phase
                + " chat_type=" + (chat_type.empty() ? "(auto)" : chat_type)
                + " ttl_ms=" + std::to_string(ttl_ms));
-      bool ok = sdk.send_status(peer,
-                                state,
-                                phase,
-                                ttl_ms,
-                                chat_type,
-                                group_user_id,
-                                group_address,
-                                group_name,
-                                seq);
+      bool ok = account->sdk->send_status(peer,
+                                          state,
+                                          phase,
+                                          ttl_ms,
+                                          chat_type,
+                                          group_user_id,
+                                          group_address,
+                                          group_name,
+                                          seq);
       send_response(client_fd, ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
     } else {
       send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"not_found\"}");
@@ -522,6 +1017,8 @@ int main(int argc, char** argv) {
     close(client_fd);
   }
 
-  sdk.stop();
+  for (auto& kv : accounts) {
+    if (kv.second && kv.second->sdk) kv.second->sdk->stop();
+  }
   return 0;
 }
