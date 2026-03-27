@@ -66,7 +66,7 @@ You can also use the helper script:
 
 `--token` is optional. If you set it, OpenClaw must send the same bearer token.
 
-## Run In Background (systemd user service)
+## Run In Background (systemd user service, Linux only)
 
 The scripts can auto-detect `BEAGLE_SDK_ROOT` from `build/CMakeCache.txt` if you already built.
 Otherwise, export it first.
@@ -75,13 +75,14 @@ Install and start:
 
 ```bash
 export BEAGLE_SDK_ROOT=/path/to/Elastos.NET.Carrier.Native.SDK
-./start.sh --install-systemd-user
+./start.sh --install-service
 ```
 
 Status and logs:
 
 ```bash
-./start.sh --status-systemd-user
+./start.sh --status-service
+./start.sh --restart-service
 scripts/setup-systemd-user.sh logs
 scripts/setup-systemd-user.sh logs --follow
 ```
@@ -89,13 +90,40 @@ scripts/setup-systemd-user.sh logs --follow
 Uninstall:
 
 ```bash
-./start.sh --uninstall-systemd-user
+./start.sh --uninstall-service
 ```
 
 To keep it running after logout, you may need:
 
 ```bash
 loginctl enable-linger "$USER"
+```
+
+## Run In Background (launchd user agent, macOS only)
+
+The macOS helper also auto-detects `BEAGLE_SDK_ROOT` from `build/CMakeCache.txt`
+if you already built. Otherwise, export it first.
+
+Install and start:
+
+```bash
+export BEAGLE_SDK_ROOT=/path/to/Elastos.NET.Carrier.Native.SDK
+./start.sh --install-service
+```
+
+Status and logs:
+
+```bash
+./start.sh --status-service
+./start.sh --restart-service
+scripts/setup-launchd-user.sh logs
+scripts/setup-launchd-user.sh logs --follow
+```
+
+Uninstall:
+
+```bash
+./start.sh --uninstall-service
 ```
 
 ## Crawler Service (userid -> ip/location)
