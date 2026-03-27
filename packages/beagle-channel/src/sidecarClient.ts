@@ -33,6 +33,7 @@ export type SendMediaRequest = {
   mediaPath?: string;
   mediaType?: string;
   filename?: string;
+  outFormat?: string;
 };
 
 export type SendStatusRequest = {

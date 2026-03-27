@@ -79,3 +79,57 @@ npm run build
 - Useful logs:
   - `journalctl --user -u openclaw-gateway.service -f`
   - `journalctl --user -u beagle-sidecar.service -f`
+
+## Channel Subscription Commands (BIP-006 bootstrap)
+
+This plugin now supports lightweight local subscription commands via Beagle DM/group chat:
+
+- `/channels` (or `/discover`) — list available channels
+- `/subscribe <channel-id-or-name>`
+- `/unsubscribe <channel-id-or-name>`
+- `/subscriptions` (or `/subs`)
+
+When a subscribed Discord channel receives a new inbound message, the plugin forwards that post to all matching Beagle subscribers. Group subscriptions are delivered back through the CarrierGroup reply envelope path, and DM subscriptions are delivered as direct Beagle messages.
+
+Discord attachment fanout to DM subscribers uses sidecar media `outFormat: "swift-json"` for iOS compatibility. In live testing on March 11, 2026, sidecar `auto` mode could fall back to `packed` media payloads after file-transfer timeout, and iOS subscribers did not render those images reliably.
+
+Implementation note:
+- The working relay uses a background Discord REST poller inside the Beagle plugin.
+- This is intentional: OpenClaw's `message_received` hook only sees messages that already entered the agent dispatch path, which misses ordinary channel traffic.
+- Bot-authored Discord replies are also relayed, so agent responses in subscribed channels reach Beagle subscribers.
+
+### Configure channel discovery
+
+Set `subscribableChannels` under your Beagle account config:
+
+```json
+{
+  "channels": {
+    "beagle": {
+      "accounts": {
+        "default": {
+          "subscribableChannels": [
+            { "id": "1476753578482995334", "name": "#beagle", "description": "BIP discussions" },
+            { "id": "1475346350596947979", "name": "#verify", "description": "verification flow" }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+### Local storage
+
+Subscriptions are persisted to:
+- `~/.openclaw/workspace/memory/beagle-channel-subscriptions.json`
+
+Override path with:
+- `BEAGLE_SUBSCRIPTION_STORE_PATH=/custom/path/subscriptions.json`
+
+Store format notes:
+- `version: 2` records include `deliveryPeerId` for actual Beagle delivery.
+- Group subscriptions also persist `groupUserId` and `groupAddress` so Discord fanout can be sent back into the original Beagle group.
+
+See:
+- `docs/BEAGLE_DISCORD_SUBSCRIPTION_RELAY.md`

@@ -10,8 +10,11 @@ UNIT_PATH="$UNIT_DIR/beagle-sidecar.service"
 usage() {
   cat <<'EOF'
 Usage:
+  scripts/setup-systemd-user.sh start
+  scripts/setup-systemd-user.sh stop
   scripts/setup-systemd-user.sh install
   scripts/setup-systemd-user.sh uninstall
+  scripts/setup-systemd-user.sh restart
   scripts/setup-systemd-user.sh status
   scripts/setup-systemd-user.sh logs
   scripts/setup-systemd-user.sh logs --follow
@@ -23,6 +26,25 @@ Environment:
   BEAGLE_SIDECAR_TOKEN       Optional bearer token
   BEAGLE_SIDECAR_EXTRA_ARGS  Optional extra args (space-separated)
 EOF
+}
+
+require_systemd_user() {
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    echo "systemd user services are only supported on Linux. Current OS: $(uname -s)." >&2
+    exit 1
+  fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "systemctl is required but was not found in PATH." >&2
+    exit 1
+  fi
+}
+
+maybe_delegate() {
+  case "$(uname -s)" in
+    Darwin)
+      exec "$SCRIPT_DIR/setup-launchd-user.sh" "$@"
+      ;;
+  esac
 }
 
 resolve_sdk_root() {
@@ -81,8 +103,19 @@ write_unit() {
 
 cmd="${1:-}"
 subcmd="${2:-}"
+maybe_delegate "$@"
 case "$cmd" in
+  start)
+    require_systemd_user
+    systemctl --user start beagle-sidecar
+    systemctl --user status beagle-sidecar --no-pager
+    ;;
+  stop)
+    require_systemd_user
+    systemctl --user stop beagle-sidecar
+    ;;
   install)
+    require_systemd_user
     ensure_sdk_root
     write_unit
     systemctl --user daemon-reload
@@ -90,14 +123,22 @@ case "$cmd" in
     systemctl --user status beagle-sidecar --no-pager
     ;;
   uninstall)
+    require_systemd_user
     systemctl --user disable --now beagle-sidecar || true
     rm -f "$UNIT_PATH"
     systemctl --user daemon-reload
     ;;
+  restart)
+    require_systemd_user
+    systemctl --user restart beagle-sidecar
+    systemctl --user status beagle-sidecar --no-pager
+    ;;
   status)
+    require_systemd_user
     systemctl --user status beagle-sidecar --no-pager
     ;;
   logs)
+    require_systemd_user
     case "$subcmd" in
       --follow|-f)
         journalctl --user -u beagle-sidecar -n 200 -f

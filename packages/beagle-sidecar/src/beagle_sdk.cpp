@@ -64,6 +64,27 @@ bool BeagleSdk::send_media(const std::string& peer,
   return true;
 }
 
+bool BeagleSdk::send_status(const std::string& peer,
+                            const std::string& state,
+                            const std::string& phase,
+                            int ttl_ms,
+                            const std::string& chat_type,
+                            const std::string& group_user_id,
+                            const std::string& group_address,
+                            const std::string& group_name,
+                            const std::string& seq) {
+  std::cerr << "[beagle-sdk] send_status stub. peer=" << peer
+            << " state=" << state
+            << " phase=" << phase
+            << " ttl_ms=" << ttl_ms
+            << " chat_type=" << chat_type
+            << " group_user_id=" << group_user_id
+            << " group_address=" << group_address
+            << " group_name=" << group_name
+            << " seq=" << seq << "\n";
+  return true;
+}
+
 BeagleStatus BeagleSdk::status() const {
   BeagleStatus s;
   s.ready = true;
@@ -122,6 +143,41 @@ struct DbConfig {
   int crawler_lookback_files = 20;
 };
 
+struct PushApiServerConfig {
+  std::string url;
+  std::string app_key;
+  std::string register_push_path = "/push-api/register";
+  std::string notification_path = "/push-api/notification";
+  std::string push_path = "/push-api/push-message";
+};
+
+struct PushConfig {
+  bool enabled = false;
+  bool register_on_start = true;
+  std::string env = "prod";
+  std::string app_name = "openclaw-beagle-sidecar";
+  std::string token;
+  std::string token_type = "sidecar";
+  std::string brand = "OpenClaw";
+  std::string model = "Beagle Sidecar";
+  std::string os = "macOS";
+  std::string os_version = "unknown";
+  std::string notification_mode = "first_until_online";
+  int notification_min_interval_seconds = 300;
+  std::vector<PushApiServerConfig> servers;
+};
+
+struct PushPeerNotifyState {
+  bool sent_since_online = false;
+  long long last_sent_ts = 0;
+};
+
+struct MessageReceiptContext {
+  std::string peer;
+  std::string text;
+  bool notify_on_offline = false;
+};
+
 struct ProfileInfo {
   std::string name;
   std::string gender;
@@ -141,12 +197,14 @@ struct RuntimeState {
   std::string profile_path;
   std::string welcome_state_path;
   std::string db_config_path;
+  std::string push_config_path;
   std::string friend_state_path;
   std::string friend_event_log_path;
   std::string incoming_event_log_path;
   std::string media_dir;
   std::string user_id;
   std::string address;
+  std::string self_display_name;
   int64_t startup_ts_us = 0;
   BeagleStatus status;
   std::unordered_set<std::string> welcomed_peers;
@@ -156,6 +214,8 @@ struct RuntimeState {
   std::deque<std::string> seen_incoming_order;
   std::map<std::string, FriendState> friend_state;
   DbConfig db;
+  PushConfig push;
+  std::unordered_map<std::string, PushPeerNotifyState> push_peer_notify_state;
   std::mutex crawler_mu;
   std::map<std::string, std::pair<std::string, std::string>> crawler_index;
   std::string crawler_index_signature;
@@ -1196,6 +1256,57 @@ static bool extract_json_bool(const std::string& body, const std::string& key, b
   return false;
 }
 
+static bool find_json_array_bounds(const std::string& body,
+                                   const std::string& key,
+                                   size_t& start,
+                                   size_t& end) {
+  std::string needle = "\"" + key + "\"";
+  size_t key_pos = body.find(needle);
+  if (key_pos == std::string::npos) return false;
+  size_t bracket = body.find('[', key_pos + needle.size());
+  if (bracket == std::string::npos) return false;
+  int depth = 0;
+  for (size_t i = bracket; i < body.size(); ++i) {
+    if (body[i] == '[') depth++;
+    else if (body[i] == ']') {
+      depth--;
+      if (depth == 0) {
+        start = bracket;
+        end = i;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static void extract_json_object_array(const std::string& body,
+                                      const std::string& key,
+                                      std::vector<std::string>& objects) {
+  objects.clear();
+  size_t start = 0;
+  size_t end = 0;
+  if (!find_json_array_bounds(body, key, start, end)) return;
+  size_t pos = start + 1;
+  while (pos < end) {
+    size_t brace = body.find('{', pos);
+    if (brace == std::string::npos || brace >= end) break;
+    int depth = 0;
+    for (size_t i = brace; i < end; ++i) {
+      if (body[i] == '{') depth++;
+      else if (body[i] == '}') {
+        depth--;
+        if (depth == 0) {
+          objects.push_back(body.substr(brace, i - brace + 1));
+          pos = i + 1;
+          break;
+        }
+      }
+    }
+    if (pos <= brace) break;
+  }
+}
+
 static std::string default_profile_json() {
   return std::string("{\n")
       + "  \"welcomeMessage\": \"Hi! I'm the Beagle OpenClaw bot. Send a message to start.\",\n"
@@ -1355,6 +1466,44 @@ static std::string default_db_json() {
       + "}\n";
 }
 
+static std::string detect_os_name() {
+#if defined(__APPLE__)
+  return "macOS";
+#elif defined(__linux__)
+  return "Linux";
+#elif defined(_WIN32)
+  return "Windows";
+#else
+  return "Unknown";
+#endif
+}
+
+static std::string default_push_json() {
+  return std::string("{\n")
+      + "  \"enabled\": false,\n"
+      + "  \"registerOnStart\": true,\n"
+      + "  \"env\": \"prod\",\n"
+      + "  \"appName\": \"openclaw-beagle-sidecar\",\n"
+      + "  \"token\": \"\",\n"
+      + "  \"tokenType\": \"sidecar\",\n"
+      + "  \"brand\": \"OpenClaw\",\n"
+      + "  \"model\": \"Beagle Sidecar\",\n"
+      + "  \"os\": \"" + json_escape(detect_os_name()) + "\",\n"
+      + "  \"osVersion\": \"\",\n"
+      + "  \"notificationMode\": \"first_until_online\",\n"
+      + "  \"notificationMinIntervalSeconds\": 300,\n"
+      + "  \"pushapiServers\": [\n"
+      + "    {\n"
+      + "      \"url\": \"https://pushapi.beagle.chat\",\n"
+      + "      \"appKey\": \"\",\n"
+      + "      \"registerPush\": \"/push-api/register\",\n"
+      + "      \"notification\": \"/push-api/notification\",\n"
+      + "      \"push\": \"/push-api/push-message\"\n"
+      + "    }\n"
+      + "  ]\n"
+      + "}\n";
+}
+
 static void ensure_profile_file(RuntimeState* state) {
   if (!state || state->profile_path.empty()) return;
   if (file_exists(state->profile_path)) return;
@@ -1368,6 +1517,14 @@ static void ensure_db_file(RuntimeState* state) {
   if (file_exists(state->db_config_path)) return;
   if (!write_file(state->db_config_path, default_db_json())) {
     log_line(std::string("[beagle-sdk] failed to write default db config to ") + state->db_config_path);
+  }
+}
+
+static void ensure_push_file(RuntimeState* state) {
+  if (!state || state->push_config_path.empty()) return;
+  if (file_exists(state->push_config_path)) return;
+  if (!write_file(state->push_config_path, default_push_json())) {
+    log_line(std::string("[beagle-sdk] failed to write default push config to ") + state->push_config_path);
   }
 }
 
@@ -1403,6 +1560,52 @@ static void load_db_config(RuntimeState* state, DbConfig& db) {
   if (db.crawler_refresh_seconds < 5) db.crawler_refresh_seconds = 5;
   if (db.crawler_lookback_files < 1) db.crawler_lookback_files = 1;
   if (db.crawler_lookback_files > 200) db.crawler_lookback_files = 200;
+}
+
+static void load_push_config(RuntimeState* state, PushConfig& push) {
+  if (!state) return;
+  ensure_push_file(state);
+  std::string body;
+  if (!read_file(state->push_config_path, body)) return;
+  extract_json_bool(body, "enabled", push.enabled);
+  extract_json_bool(body, "registerOnStart", push.register_on_start);
+  extract_json_string(body, "env", push.env);
+  extract_json_string(body, "appName", push.app_name);
+  extract_json_string(body, "token", push.token);
+  extract_json_string(body, "tokenType", push.token_type);
+  extract_json_string(body, "brand", push.brand);
+  extract_json_string(body, "model", push.model);
+  extract_json_string(body, "os", push.os);
+  extract_json_string(body, "osVersion", push.os_version);
+  extract_json_string(body, "notificationMode", push.notification_mode);
+  extract_json_int(body, "notificationMinIntervalSeconds", push.notification_min_interval_seconds);
+  if (push.notification_min_interval_seconds < 0) push.notification_min_interval_seconds = 0;
+  push.notification_mode = lowercase(trim_copy(push.notification_mode));
+  if (push.notification_mode != "first_until_online" && push.notification_mode != "interval") {
+    push.notification_mode = "first_until_online";
+  }
+
+  std::vector<std::string> server_objects;
+  extract_json_object_array(body, "pushapiServers", server_objects);
+  push.servers.clear();
+  for (const auto& obj : server_objects) {
+    PushApiServerConfig server;
+    extract_json_string(obj, "url", server.url);
+    extract_json_string(obj, "appKey", server.app_key);
+    extract_json_string(obj, "registerPush", server.register_push_path);
+    extract_json_string(obj, "notification", server.notification_path);
+    extract_json_string(obj, "push", server.push_path);
+    server.url = trim_copy(server.url);
+    if (server.url.empty() || server.app_key.empty()) continue;
+    push.servers.push_back(std::move(server));
+  }
+
+  if (push.os.empty()) push.os = detect_os_name();
+  if (push.brand.empty()) push.brand = "OpenClaw";
+  if (push.model.empty()) push.model = "Beagle Sidecar";
+  if (push.token_type.empty()) push.token_type = "sidecar";
+  if (push.app_name.empty()) push.app_name = "openclaw-beagle-sidecar";
+  if (push.env.empty()) push.env = "prod";
 }
 
 static void load_welcomed_peers(RuntimeState* state) {
@@ -1842,6 +2045,7 @@ static void update_friend_status(RuntimeState* state,
     fs.status = status >= 0 ? status : 0;
     fs.presence = presence >= 0 ? presence : 0;
     state->friend_state[friendid] = fs;
+    if (fs.status != 0) state->push_peer_notify_state.erase(friendid);
     save_friend_state(state);
     if (log_event) log_friend_event(state, friendid, status ? "online" : "offline", status, presence);
     return;
@@ -1856,8 +2060,10 @@ static void update_friend_status(RuntimeState* state,
     }
     return;
   }
+  bool became_online = (it->second.status == 0 && next_status != 0);
   it->second.status = next_status;
   it->second.presence = next_presence;
+  if (became_online) state->push_peer_notify_state.erase(friendid);
   save_friend_state(state);
   if (log_event && changed) log_friend_event(state, friendid, next_status ? "online" : "offline", next_status, next_presence);
 }
@@ -1870,6 +2076,336 @@ static bool is_friend_online(RuntimeState* state, const std::string& friendid, b
   if (it == state->friend_state.end()) return false;
   known = true;
   return it->second.status != 0;
+}
+
+static std::string join_url_path(const std::string& base, const std::string& path) {
+  if (base.empty()) return path;
+  if (path.empty()) return base;
+  if (base.back() == '/' && path.front() == '/') return base.substr(0, base.size() - 1) + path;
+  if (base.back() != '/' && path.front() != '/') return base + "/" + path;
+  return base + path;
+}
+
+static std::string build_push_request_body(const std::vector<std::pair<std::string, std::string>>& fields) {
+  std::ostringstream body;
+  body << "{";
+  for (size_t i = 0; i < fields.size(); ++i) {
+    if (i) body << ",";
+    body << json_quote(fields[i].first) << ":" << json_quote(fields[i].second);
+  }
+  body << "}";
+  return body.str();
+}
+
+static std::string url_encode(const std::string& in) {
+  static const char* kHex = "0123456789ABCDEF";
+  std::string out;
+  out.reserve(in.size() * 3);
+  for (unsigned char c : in) {
+    if ((c >= 'a' && c <= 'z') ||
+        (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') ||
+        c == '-' || c == '_' || c == '.' || c == '~') {
+      out.push_back(static_cast<char>(c));
+    } else if (c == ' ') {
+      out.push_back('+');
+    } else {
+      out.push_back('%');
+      out.push_back(kHex[(c >> 4) & 0x0F]);
+      out.push_back(kHex[c & 0x0F]);
+    }
+  }
+  return out;
+}
+
+static std::string build_form_body(const std::vector<std::pair<std::string, std::string>>& fields) {
+  std::ostringstream body;
+  for (size_t i = 0; i < fields.size(); ++i) {
+    if (i) body << "&";
+    body << url_encode(fields[i].first) << "=" << url_encode(fields[i].second);
+  }
+  return body.str();
+}
+
+static bool post_json_with_curl(const std::string& url,
+                                const std::string& body,
+                                long timeout_seconds,
+                                std::string& detail) {
+  if (url.empty()) {
+    detail = "empty url";
+    return false;
+  }
+
+  char path_template[] = "/tmp/beagle_push_body_XXXXXX";
+  int fd = mkstemp(path_template);
+  if (fd < 0) {
+    detail = "mkstemp failed";
+    return false;
+  }
+
+  bool write_ok = true;
+  size_t off = 0;
+  while (off < body.size()) {
+    ssize_t n = write(fd, body.data() + off, body.size() - off);
+    if (n <= 0) {
+      write_ok = false;
+      break;
+    }
+    off += static_cast<size_t>(n);
+  }
+  close(fd);
+  if (!write_ok) {
+    unlink(path_template);
+    detail = "write temp body failed";
+    return false;
+  }
+
+  std::ostringstream cmd;
+  cmd << "curl -sS -m " << timeout_seconds
+      << " --connect-timeout 8 -o /dev/null -w \"%{http_code}\" "
+      << "-H \"Content-Type: application/json\" "
+      << "-X POST "
+      << "--data-binary @" << path_template << " "
+      << shell_escape(url) << " 2>/dev/null";
+  FILE* pipe = popen(cmd.str().c_str(), "r");
+  if (!pipe) {
+    unlink(path_template);
+    detail = "popen curl failed";
+    return false;
+  }
+  char buf[128];
+  std::string out;
+  while (std::fgets(buf, sizeof(buf), pipe)) out += buf;
+  int rc = pclose(pipe);
+  unlink(path_template);
+
+  std::string code = trim_copy_simple(out);
+  detail = "curl_rc=" + std::to_string(rc) + " http=" + code;
+  return code == "200" || code == "201" || code == "204";
+}
+
+static bool post_form_with_curl(const std::string& url,
+                                const std::string& body,
+                                long timeout_seconds,
+                                std::string& detail) {
+  if (url.empty()) {
+    detail = "empty url";
+    return false;
+  }
+
+  char path_template[] = "/tmp/beagle_push_form_XXXXXX";
+  int fd = mkstemp(path_template);
+  if (fd < 0) {
+    detail = "mkstemp failed";
+    return false;
+  }
+
+  bool write_ok = true;
+  size_t off = 0;
+  while (off < body.size()) {
+    ssize_t n = write(fd, body.data() + off, body.size() - off);
+    if (n <= 0) {
+      write_ok = false;
+      break;
+    }
+    off += static_cast<size_t>(n);
+  }
+  close(fd);
+  if (!write_ok) {
+    unlink(path_template);
+    detail = "write temp body failed";
+    return false;
+  }
+
+  std::ostringstream cmd;
+  cmd << "curl -sS -m " << timeout_seconds
+      << " --connect-timeout 8 -o /dev/null -w \"%{http_code}\" "
+      << "-H \"Content-Type: application/x-www-form-urlencoded\" "
+      << "-X POST "
+      << "--data-binary @" << path_template << " "
+      << shell_escape(url) << " 2>/dev/null";
+  FILE* pipe = popen(cmd.str().c_str(), "r");
+  if (!pipe) {
+    unlink(path_template);
+    detail = "popen curl failed";
+    return false;
+  }
+  char buf[128];
+  std::string out;
+  while (std::fgets(buf, sizeof(buf), pipe)) out += buf;
+  int rc = pclose(pipe);
+  unlink(path_template);
+
+  std::string code = trim_copy_simple(out);
+  detail = "curl_rc=" + std::to_string(rc) + " http=" + code;
+  return code == "200" || code == "201" || code == "204";
+}
+
+static std::string push_sender_name(RuntimeState* state) {
+  if (!state) return "Beagle";
+  std::string name = trim_copy(state->self_display_name);
+  if (!name.empty()) return name;
+  name = trim_copy(state->user_id);
+  if (!name.empty()) return name;
+  return "Beagle";
+}
+
+static std::string push_text_payload(RuntimeState* state, const std::string& text) {
+  std::string preview = preview_text(text, 180);
+  if (preview.empty()) preview = "[message]";
+  return push_sender_name(state) + ": " + preview;
+}
+
+static std::string ltrim_copy(const std::string& s) {
+  size_t i = 0;
+  while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+  return s.substr(i);
+}
+
+static void parse_notification_text(const std::string& text,
+                                    const std::string& fallback_title,
+                                    std::string& title,
+                                    std::string& body) {
+  std::string cleaned = ltrim_copy(text);
+  title = fallback_title;
+  body = cleaned;
+
+  if (!cleaned.empty() && cleaned[0] == '[') {
+    size_t end = cleaned.find(']');
+    if (end != std::string::npos && end > 1) {
+      std::string channel = cleaned.substr(1, end - 1);
+      if (!channel.empty() && channel[0] == '#') channel.erase(0, 1);
+      if (!channel.empty()) title = channel;
+      cleaned = ltrim_copy(cleaned.substr(end + 1));
+    }
+  }
+
+  size_t colon = cleaned.find(": ");
+  if (colon != std::string::npos && colon + 2 < cleaned.size()) {
+    body = cleaned.substr(colon + 2);
+  } else if (!cleaned.empty()) {
+    body = cleaned;
+  }
+
+  title = preview_text(title, 80);
+  body = preview_text(body, 180);
+  if (title.empty()) title = fallback_title.empty() ? "Beagle" : fallback_title;
+  if (body.empty()) body = "[message]";
+}
+
+static std::string push_notification_payload(RuntimeState* state, const std::string& text) {
+  std::string title;
+  std::string body;
+  parse_notification_text(text, push_sender_name(state), title, body);
+  return title + ": " + body;
+}
+
+static bool should_send_offline_notification_locked(RuntimeState* state,
+                                                    const std::string& peer,
+                                                    long long now_ts) {
+  if (!state) return false;
+  const PushConfig& push = state->push;
+  auto& peer_state = state->push_peer_notify_state[peer];
+  if (push.notification_mode == "first_until_online") {
+    if (peer_state.sent_since_online) return false;
+    peer_state.sent_since_online = true;
+    peer_state.last_sent_ts = now_ts;
+    return true;
+  }
+  if (push.notification_mode == "interval") {
+    if (peer_state.last_sent_ts > 0
+        && push.notification_min_interval_seconds > 0
+        && (now_ts - peer_state.last_sent_ts) < push.notification_min_interval_seconds) {
+      return false;
+    }
+    peer_state.sent_since_online = true;
+    peer_state.last_sent_ts = now_ts;
+    return true;
+  }
+  return false;
+}
+
+static bool send_push_registration(RuntimeState* state) {
+  if (!state) return false;
+  const PushConfig& push = state->push;
+  if (!push.enabled || !push.register_on_start || push.servers.empty()) return false;
+
+  std::string token = trim_copy(push.token);
+  if (token.empty()) token = "sidecar:" + state->user_id;
+
+  std::vector<std::pair<std::string, std::string>> fields = {
+      {"env", push.env},
+      {"account", state->user_id},
+      {"token", token},
+      {"tokenType", push.token_type},
+      {"os", push.os},
+      {"osVersion", push.os_version},
+      {"brand", push.brand},
+      {"model", push.model},
+      {"appKey", ""},
+      {"appName", push.app_name},
+  };
+
+  for (const auto& server : push.servers) {
+    fields[8].second = server.app_key;
+    std::string url = join_url_path(server.url, server.register_push_path);
+    std::string detail;
+    std::string body = build_push_request_body(fields);
+    if (post_json_with_curl(url, body, 15, detail)) {
+      log_line(std::string("[beagle-sdk] push register ok url=") + url + " detail=" + detail);
+      return true;
+    }
+    log_line(std::string("[beagle-sdk] push register failed url=") + url + " detail=" + detail);
+  }
+  return false;
+}
+
+static void maybe_notify_offline_delivery(RuntimeState* state,
+                                          const std::string& peer,
+                                          const std::string& text) {
+  if (!state) return;
+  PushConfig push_copy;
+  {
+    std::lock_guard<std::mutex> lock(state->state_mu);
+    if (!state->push.enabled || state->push.servers.empty()) return;
+    long long now_ts = static_cast<long long>(std::time(nullptr));
+    if (!should_send_offline_notification_locked(state, peer, now_ts)) return;
+    push_copy = state->push;
+  }
+
+  std::string form_payload = push_notification_payload(state, text);
+  std::vector<std::pair<std::string, std::string>> fields = {
+      {"env", push_copy.env},
+      {"account", peer},
+      {"payload", form_payload},
+      {"appKey", ""},
+      {"appName", push_copy.app_name},
+  };
+
+  bool delivered = false;
+  for (const auto& server : push_copy.servers) {
+    fields[3].second = server.app_key;
+    std::string url = join_url_path(server.url, server.notification_path);
+    std::string detail;
+    std::string body = build_form_body(fields);
+    if (post_form_with_curl(url, body, 15, detail)) {
+      log_line(std::string("[beagle-sdk] offline notification ok peer=") + peer
+               + " url=" + url + " detail=" + detail);
+      delivered = true;
+      break;
+    }
+    log_line(std::string("[beagle-sdk] offline notification failed peer=") + peer
+             + " url=" + url + " detail=" + detail);
+  }
+
+  if (!delivered) {
+    std::lock_guard<std::mutex> lock(state->state_mu);
+    auto it = state->push_peer_notify_state.find(peer);
+    if (it != state->push_peer_notify_state.end()) {
+      it->second.sent_since_online = false;
+      it->second.last_sent_ts = 0;
+    }
+  }
 }
 
 static void apply_profile(RuntimeState* state, const ProfileInfo& profile) {
@@ -1893,6 +2429,7 @@ static void apply_profile(RuntimeState* state, const ProfileInfo& profile) {
   } else {
     log_line("[beagle-sdk] self info updated");
   }
+  if (!profile.name.empty()) state->self_display_name = profile.name;
 }
 
 static void send_welcome_once(RuntimeState* state, const std::string& peer, const char* reason) {
@@ -2612,9 +3149,87 @@ void friend_invite_callback(Carrier* carrier,
     state->status.last_online_ts = incoming.ts;
   }
 }
+
 } // namespace
 
 static RuntimeState g_state;
+
+static void friend_message_receipt_callback(uint32_t msgid,
+                                            CarrierReceiptState state,
+                                            void* context) {
+  std::unique_ptr<MessageReceiptContext> receipt(static_cast<MessageReceiptContext*>(context));
+  if (!receipt) return;
+
+  const char* state_name = "unknown";
+  switch (state) {
+    case CarrierReceipt_ByFriend:
+      state_name = "by_friend";
+      break;
+    case CarrierReceipt_Offline:
+      state_name = "offline_store";
+      break;
+    case CarrierReceipt_Error:
+      state_name = "error";
+      break;
+    default:
+      break;
+  }
+
+  log_line(std::string("[beagle-sdk] message receipt msgid=") + std::to_string(msgid)
+           + " peer=" + receipt->peer
+           + " state=" + state_name);
+
+  if (receipt->notify_on_offline && state == CarrierReceipt_Offline) {
+    maybe_notify_offline_delivery(&g_state, receipt->peer, receipt->text);
+  }
+}
+
+static bool send_text_internal(const std::string& peer,
+                               const std::string& text,
+                               bool notify_on_offline) {
+  if (!g_state.carrier) return false;
+  uint32_t msgid = 0;
+  MessageReceiptContext* receipt_context = nullptr;
+  CarrierFriendMessageReceiptCallback* receipt_callback = nullptr;
+  if (notify_on_offline) {
+    receipt_context = new MessageReceiptContext{peer, text, notify_on_offline};
+    receipt_callback = friend_message_receipt_callback;
+  }
+  int rc = carrier_send_friend_message(g_state.carrier,
+                                       peer.c_str(),
+                                       text.data(),
+                                       text.size(),
+                                       &msgid,
+                                       receipt_callback,
+                                       receipt_context);
+  if (rc < 0) {
+    if (receipt_context) delete receipt_context;
+    int err = carrier_get_error();
+    if (notify_on_offline && is_friend_offline_error(err)) {
+      maybe_notify_offline_delivery(&g_state, peer, text);
+    }
+    std::string detail;
+    if (post_payload_to_express_node(&g_state, peer, text.data(), text.size(), detail)) {
+      log_line(std::string("[beagle-sdk] send_text express fallback ok peer=")
+               + peer + " bytes=" + std::to_string(text.size())
+               + " detail=" + detail
+               + " carrier_err=0x" + [&]() {
+                   std::ostringstream oss;
+                   oss << std::hex << err;
+                   return oss.str();
+                 }());
+      return true;
+    }
+    log_line(std::string("[beagle-sdk] send_text express fallback failed peer=")
+             + peer + " detail=" + detail);
+    std::ostringstream msg;
+    msg << "[beagle-sdk] send_text failed: 0x" << std::hex << err << std::dec;
+    log_line(msg.str());
+    return false;
+  }
+  log_line(std::string("[beagle-sdk] send_text ok msgid=") + std::to_string(msgid) + " peer=" + peer);
+  return true;
+}
 
 bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on_incoming) {
   if (options.config_path.empty()) {
@@ -2636,6 +3251,7 @@ bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on
     g_state.profile_path = g_state.persistent_location + "/beagle_profile.json";
     g_state.welcome_state_path = g_state.persistent_location + "/welcomed_peers.txt";
     g_state.db_config_path = g_state.persistent_location + "/beagle_db.json";
+    g_state.push_config_path = g_state.persistent_location + "/beagle_push.json";
     g_state.friend_state_path = g_state.persistent_location + "/friend_state.tsv";
     g_state.friend_event_log_path = g_state.persistent_location + "/friend_events.log";
     g_state.incoming_event_log_path = g_state.persistent_location + "/incoming_events.jsonl";
@@ -2701,11 +3317,13 @@ bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on
   apply_profile(&g_state, profile);
 
   load_db_config(&g_state, g_state.db);
+  load_push_config(&g_state, g_state.push);
   ensure_db(&g_state, g_state.db);
   if (g_state.db.use_crawler_index) {
     refresh_crawler_index_if_needed(&g_state);
   }
   load_friend_state(&g_state);
+  send_push_registration(&g_state);
 
   g_state.loop_thread = std::thread([]() {
     int rc = carrier_run(g_state.carrier, 10);
@@ -2737,38 +3355,7 @@ void BeagleSdk::stop() {
 }
 
 bool BeagleSdk::send_text(const std::string& peer, const std::string& text) {
-  if (!g_state.carrier) return false;
-  uint32_t msgid = 0;
-  int rc = carrier_send_friend_message(g_state.carrier,
-                                       peer.c_str(),
-                                       text.data(),
-                                       text.size(),
-                                       &msgid,
-                                       nullptr,
-                                       nullptr);
-  if (rc < 0) {
-    int err = carrier_get_error();
-    std::string detail;
-    if (post_payload_to_express_node(&g_state, peer, text.data(), text.size(), detail)) {
-      log_line(std::string("[beagle-sdk] send_text express fallback ok peer=")
-               + peer + " bytes=" + std::to_string(text.size())
-               + " detail=" + detail
-               + " carrier_err=0x" + [&]() {
-                   std::ostringstream oss;
-                   oss << std::hex << err;
-                   return oss.str();
-                 }());
-      return true;
-    }
-    log_line(std::string("[beagle-sdk] send_text express fallback failed peer=")
-             + peer + " detail=" + detail);
-    std::ostringstream msg;
-    msg << "[beagle-sdk] send_text failed: 0x" << std::hex << err << std::dec;
-    log_line(msg.str());
-    return false;
-  }
-  log_line(std::string("[beagle-sdk] send_text ok msgid=") + std::to_string(msgid) + " peer=" + peer);
-  return true;
+  return send_text_internal(peer, text, true);
 }
 
 bool BeagleSdk::send_status(const std::string& peer,
@@ -2830,7 +3417,7 @@ bool BeagleSdk::send_status(const std::string& peer,
            + " state=" + normalized_state
            + " chat_type=" + normalized_chat_type
            + " ttl_ms=" + std::to_string(next_ttl_ms));
-  return send_text(normalized_peer, wire_payload);
+  return send_text_internal(normalized_peer, wire_payload, false);
 }
 
 bool BeagleSdk::send_media(const std::string& peer,
@@ -2857,7 +3444,7 @@ bool BeagleSdk::send_media(const std::string& peer,
       if (!payload.empty()) payload += "\n";
       payload += "mediaType: " + media_type;
     }
-    return send_text(peer, payload);
+    return send_text_internal(peer, payload, false);
   }
 
   unsigned long long size = file_size_bytes(media_path);

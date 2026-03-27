@@ -4,3 +4,5 @@ node_modules
 /build
 packages/beagle-channel/dist
 packages/beagle-sidecar/build
+packages/beagle-sidecar/build-real
+beagle_push.json
