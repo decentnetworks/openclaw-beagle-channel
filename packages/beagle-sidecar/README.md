@@ -58,6 +58,58 @@ Run with a Carrier config:
 ./build/beagle-sidecar --config $BEAGLE_SDK_ROOT/config/carrier.conf --data-dir ~/.carrier
 ```
 
+Multi-agent mode (auto-discover OpenClaw agents and allocate one Carrier identity per agent):
+
+```bash
+./build/beagle-sidecar \
+  --config $BEAGLE_SDK_ROOT/config/carrier.conf \
+  --data-dir ~/.carrier \
+  --openclaw-config ~/.openclaw/openclaw.json
+```
+
+If `--openclaw-config` is omitted, sidecar checks:
+
+1. `BEAGLE_OPENCLAW_CONFIG`
+2. `OPENCLAW_CONFIG`
+3. `~/.openclaw/openclaw.json` (if present)
+
+When agents are discovered, sidecar starts one account per agent and uses agent metadata
+(`name`, `description`, `gender`, `phone`, `email`, `region`) to populate Carrier self userinfo.
+
+## Multi-Agent Routing (What Was Asked vs Implemented)
+
+Requested:
+
+- One Carrier address per OpenClaw agent (not one address for the whole OpenClaw instance)
+- Use OpenClaw agent info to fill Carrier userinfo/friendinfo-visible profile fields
+- Ensure inbound Carrier messages are delivered to the right OpenClaw agent
+
+Implemented:
+
+- Sidecar discovers agents from local OpenClaw config file (`openclaw.json`) and starts one sidecar account per agent
+- Each account has its own Carrier identity/address and isolated data directory
+- Sidecar writes metadata (`carrierUserId`, `carrierAddress`, `openclawAgentId`) to profile and applies agent profile overrides
+- API is account-aware via `X-Beagle-Account` (or body `accountId`)
+- Default account prefers `main`, then `default`, then first available account
+
+How a Carrier message reaches the right agent:
+
+1. `beagle-channel` polls `/events` with `X-Beagle-Account:<accountId>`
+2. Sidecar returns only events for that account's Carrier identity
+3. OpenClaw runtime resolves final `agentId` using channel routing rules with `(channel=beagle, accountId, peer)`
+4. Outbound reply uses the same account header, so it sends from the matching Carrier address
+
+How to use with your `main` + `beagle-profile` agents:
+
+1. Verify OpenClaw agent bindings:
+   - `openclaw agents list --bindings`
+2. Start sidecar with OpenClaw config:
+   - `./build/beagle-sidecar --config $BEAGLE_SDK_ROOT/config/carrier.conf --data-dir ~/.carrier --openclaw-config ~/.openclaw/openclaw.json`
+3. Check generated accounts and addresses:
+   - `curl -s http://127.0.0.1:39091/health`
+4. Configure `channels.beagle.accounts` in OpenClaw so account IDs match agent accounts
+5. Ensure routing bindings map beagle account/peer to the intended agent (verify again with `--bindings`)
+
 You can also use the helper script:
 
 ```bash
@@ -162,6 +214,10 @@ When you pass `--data-dir`, the sidecar will create:
 - `friend_state.tsv` (last known friend info/status snapshot)
 - `friend_events.log` (online/offline events)
 
+In multi-agent mode, files are isolated per account under:
+
+- `--data-dir/accounts/<accountId>/...`
+
 Edit `beagle_profile.json` at any time to update the user profile and welcome text.
 Default contents:
 
@@ -208,12 +264,18 @@ When enabled, the sidecar creates/uses:
 
 ## HTTP API
 
-- `GET /health` -> `{ "ok": true }`
-- `GET /status` -> sidecar runtime status snapshot
-- `POST /sendText` `{ "peer": "...", "text": "..." }`
-- `POST /sendMedia` `{ "peer": "...", "caption": "...", "mediaPath": "..." }`
-- `POST /sendStatus` `{ "peer":"...", "state":"typing|thinking|tool|sending|idle|error", "ttlMs":12000, "chatType":"direct|group", "groupUserId":"...", "groupAddress":"...", "groupName":"...", "phase":"...", "seq":"..." }`
-- `GET /events` -> `[{"peer":"...","text":"..."}]`
+- `GET /health` -> selected account identity + all account list
+- `GET /status` -> selected account runtime status snapshot
+- `POST /sendText` `{ "peer": "...", "text": "...", "accountId":"optional" }`
+- `POST /sendMedia` `{ "peer": "...", "caption": "...", "mediaPath": "...", "accountId":"optional" }`
+- `POST /sendStatus` `{ "peer":"...", "state":"typing|thinking|tool|sending|idle|error", "ttlMs":12000, "chatType":"direct|group", "groupUserId":"...", "groupAddress":"...", "groupName":"...", "phase":"...", "seq":"...", "accountId":"optional" }`
+- `GET /events` -> `[{"accountId":"...","peer":"...","text":"..."}]`
+
+Account selection:
+
+- Recommended: request header `X-Beagle-Account: <accountId>`
+- Fallback: JSON body field `accountId`
+- If omitted, sidecar uses the default account
 
 Status transport details:
 

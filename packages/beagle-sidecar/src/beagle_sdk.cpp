@@ -31,15 +31,24 @@
 #include <unistd.h>
 #endif
 
+BeagleSdk::BeagleSdk() = default;
+BeagleSdk::~BeagleSdk() { stop(); }
+
 #if BEAGLE_SDK_STUB
 
 bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on_incoming) {
   (void)on_incoming;
+  stop();
   std::cerr << "[beagle-sdk] start stub. data_dir=" << options.data_dir << "\n";
+  user_id_ = options.account_id.empty() ? "stub-user" : ("stub-user-" + options.account_id);
+  address_ = options.account_id.empty() ? "stub-address" : ("stub-address-" + options.account_id);
   return true;
 }
 
 void BeagleSdk::stop() {
+  user_id_.clear();
+  address_.clear();
+  state_ = nullptr;
   std::cerr << "[beagle-sdk] stop stub.\n";
 }
 
@@ -173,6 +182,7 @@ struct PushPeerNotifyState {
 };
 
 struct MessageReceiptContext {
+  RuntimeState* state = nullptr;
   std::string peer;
   std::string text;
   bool notify_on_offline = false;
@@ -192,6 +202,8 @@ struct RuntimeState {
   BeagleIncomingCallback on_incoming;
   std::thread loop_thread;
   std::mutex state_mu;
+  std::string account_id;
+  std::string openclaw_agent_id;
   std::string persistent_location;
   std::string welcome_message;
   std::string profile_path;
@@ -1419,7 +1431,8 @@ static std::string load_wallet_public_key() {
 
 static void ensure_profile_metadata(RuntimeState* state,
                                     const std::string& user_id,
-                                    const std::string& address) {
+                                    const std::string& address,
+                                    const std::string& openclaw_agent_id) {
   if (!state || state->profile_path.empty()) return;
   ensure_profile_file(state);
   std::string body;
@@ -1428,6 +1441,7 @@ static void ensure_profile_metadata(RuntimeState* state,
   bool changed = false;
   changed |= upsert_profile_field(body, "carrierUserId", user_id, false);
   changed |= upsert_profile_field(body, "carrierAddress", address, false);
+  changed |= upsert_profile_field(body, "openclawAgentId", openclaw_agent_id, false);
 
   std::string started_at;
   if (!extract_json_string(body, "startedAt", started_at) || started_at.empty()) {
@@ -3152,7 +3166,9 @@ void friend_invite_callback(Carrier* carrier,
 
 } // namespace
 
-static RuntimeState g_state;
+static RuntimeState* runtime_state_from_ptr(void* ptr) {
+  return static_cast<RuntimeState*>(ptr);
+}
 
 static void friend_message_receipt_callback(uint32_t msgid,
                                             CarrierReceiptState state,
@@ -3179,23 +3195,24 @@ static void friend_message_receipt_callback(uint32_t msgid,
            + " peer=" + receipt->peer
            + " state=" + state_name);
 
-  if (receipt->notify_on_offline && state == CarrierReceipt_Offline) {
-    maybe_notify_offline_delivery(&g_state, receipt->peer, receipt->text);
+  if (receipt->notify_on_offline && state == CarrierReceipt_Offline && receipt->state) {
+    maybe_notify_offline_delivery(receipt->state, receipt->peer, receipt->text);
   }
 }
 
-static bool send_text_internal(const std::string& peer,
+static bool send_text_internal(RuntimeState* state,
+                               const std::string& peer,
                                const std::string& text,
                                bool notify_on_offline) {
-  if (!g_state.carrier) return false;
+  if (!state || !state->carrier) return false;
   uint32_t msgid = 0;
   MessageReceiptContext* receipt_context = nullptr;
   CarrierFriendMessageReceiptCallback* receipt_callback = nullptr;
   if (notify_on_offline) {
-    receipt_context = new MessageReceiptContext{peer, text, notify_on_offline};
+    receipt_context = new MessageReceiptContext{state, peer, text, notify_on_offline};
     receipt_callback = friend_message_receipt_callback;
   }
-  int rc = carrier_send_friend_message(g_state.carrier,
+  int rc = carrier_send_friend_message(state->carrier,
                                        peer.c_str(),
                                        text.data(),
                                        text.size(),
@@ -3206,10 +3223,10 @@ static bool send_text_internal(const std::string& peer,
     if (receipt_context) delete receipt_context;
     int err = carrier_get_error();
     if (notify_on_offline && is_friend_offline_error(err)) {
-      maybe_notify_offline_delivery(&g_state, peer, text);
+      maybe_notify_offline_delivery(state, peer, text);
     }
     std::string detail;
-    if (post_payload_to_express_node(&g_state, peer, text.data(), text.size(), detail)) {
+    if (post_payload_to_express_node(state, peer, text.data(), text.size(), detail)) {
       log_line(std::string("[beagle-sdk] send_text express fallback ok peer=")
                + peer + " bytes=" + std::to_string(text.size())
                + " detail=" + detail
@@ -3232,10 +3249,17 @@ static bool send_text_internal(const std::string& peer,
 }
 
 bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on_incoming) {
+  stop();
   if (options.config_path.empty()) {
     log_line("[beagle-sdk] missing config file path");
     return false;
   }
+
+  std::unique_ptr<RuntimeState> owned_state(new RuntimeState());
+  RuntimeState* state = owned_state.get();
+  state->account_id = trim_copy(options.account_id.empty() ? "default" : options.account_id);
+  if (state->account_id.empty()) state->account_id = "default";
+  state->openclaw_agent_id = trim_copy(options.openclaw_agent_id);
 
   CarrierOptions opts;
   if (!carrier_config_load(options.config_path.c_str(), nullptr, &opts)) {
@@ -3244,23 +3268,23 @@ bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on
   }
 
   if (!options.data_dir.empty()) {
-    g_state.persistent_location = options.data_dir;
-    ensure_dir(g_state.persistent_location);
+    state->persistent_location = options.data_dir;
+    ensure_dir(state->persistent_location);
     // carrier_config_free() will free this field, so allocate with strdup.
-    opts.persistent_location = strdup(g_state.persistent_location.c_str());
-    g_state.profile_path = g_state.persistent_location + "/beagle_profile.json";
-    g_state.welcome_state_path = g_state.persistent_location + "/welcomed_peers.txt";
-    g_state.db_config_path = g_state.persistent_location + "/beagle_db.json";
-    g_state.push_config_path = g_state.persistent_location + "/beagle_push.json";
-    g_state.friend_state_path = g_state.persistent_location + "/friend_state.tsv";
-    g_state.friend_event_log_path = g_state.persistent_location + "/friend_events.log";
-    g_state.incoming_event_log_path = g_state.persistent_location + "/incoming_events.jsonl";
-    g_state.media_dir = g_state.persistent_location + "/media";
-    ensure_dir(g_state.media_dir);
+    opts.persistent_location = strdup(state->persistent_location.c_str());
+    state->profile_path = state->persistent_location + "/beagle_profile.json";
+    state->welcome_state_path = state->persistent_location + "/welcomed_peers.txt";
+    state->db_config_path = state->persistent_location + "/beagle_db.json";
+    state->push_config_path = state->persistent_location + "/beagle_push.json";
+    state->friend_state_path = state->persistent_location + "/friend_state.tsv";
+    state->friend_event_log_path = state->persistent_location + "/friend_events.log";
+    state->incoming_event_log_path = state->persistent_location + "/incoming_events.jsonl";
+    state->media_dir = state->persistent_location + "/media";
+    ensure_dir(state->media_dir);
   } else {
-    g_state.media_dir = "./media";
-    g_state.incoming_event_log_path = "./incoming_events.jsonl";
-    ensure_dir(g_state.media_dir);
+    state->media_dir = "./media";
+    state->incoming_event_log_path = "./incoming_events.jsonl";
+    ensure_dir(state->media_dir);
   }
 
   CarrierCallbacks callbacks;
@@ -3276,10 +3300,10 @@ bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on
   callbacks.friend_added = friend_added_callback;
   callbacks.friend_invite = friend_invite_callback;
 
-  g_state.on_incoming = std::move(on_incoming);
-  g_state.startup_ts_us = static_cast<int64_t>(std::time(nullptr)) * 1000000LL;
+  state->on_incoming = std::move(on_incoming);
+  state->startup_ts_us = static_cast<int64_t>(std::time(nullptr)) * 1000000LL;
 
-  Carrier* carrier = carrier_new(&opts, &callbacks, &g_state);
+  Carrier* carrier = carrier_new(&opts, &callbacks, state);
   carrier_config_free(&opts);
   if (!carrier) {
     std::ostringstream msg;
@@ -3288,9 +3312,9 @@ bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on
     return false;
   }
 
-  g_state.carrier = carrier;
+  state->carrier = carrier;
 
-  if (carrier_filetransfer_init(g_state.carrier, filetransfer_connect_callback, &g_state) < 0) {
+  if (carrier_filetransfer_init(state->carrier, filetransfer_connect_callback, state) < 0) {
     std::ostringstream msg;
     msg << "[beagle-sdk] carrier_filetransfer_init failed: 0x" << std::hex
         << carrier_get_error() << std::dec;
@@ -3301,32 +3325,38 @@ bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on
   char idbuf[CARRIER_MAX_ID_LEN + 1] = {0};
   carrier_get_userid(carrier, idbuf, sizeof(idbuf));
   carrier_get_address(carrier, buf, sizeof(buf));
-  g_state.user_id = idbuf;
-  g_state.address = buf;
-  user_id_ = g_state.user_id;
-  address_ = g_state.address;
+  state->user_id = idbuf;
+  state->address = buf;
+  user_id_ = state->user_id;
+  address_ = state->address;
 
-  log_line(std::string("[beagle-sdk] User ID: ") + user_id_);
-  log_line(std::string("[beagle-sdk] Address: ") + address_);
+  log_line(std::string("[beagle-sdk] account=") + state->account_id + " user_id=" + user_id_);
+  log_line(std::string("[beagle-sdk] account=") + state->account_id + " address=" + address_);
 
-  ensure_profile_metadata(&g_state, g_state.user_id, g_state.address);
+  ensure_profile_metadata(state, state->user_id, state->address, state->openclaw_agent_id);
 
   ProfileInfo profile;
-  load_profile(&g_state, profile);
-  load_welcomed_peers(&g_state);
-  apply_profile(&g_state, profile);
+  load_profile(state, profile);
+  if (!options.profile_name.empty()) profile.name = options.profile_name;
+  if (!options.profile_gender.empty()) profile.gender = options.profile_gender;
+  if (!options.profile_phone.empty()) profile.phone = options.profile_phone;
+  if (!options.profile_email.empty()) profile.email = options.profile_email;
+  if (!options.profile_description.empty()) profile.description = options.profile_description;
+  if (!options.profile_region.empty()) profile.region = options.profile_region;
+  load_welcomed_peers(state);
+  apply_profile(state, profile);
 
-  load_db_config(&g_state, g_state.db);
-  load_push_config(&g_state, g_state.push);
-  ensure_db(&g_state, g_state.db);
-  if (g_state.db.use_crawler_index) {
-    refresh_crawler_index_if_needed(&g_state);
+  load_db_config(state, state->db);
+  load_push_config(state, state->push);
+  ensure_db(state, state->db);
+  if (state->db.use_crawler_index) {
+    refresh_crawler_index_if_needed(state);
   }
-  load_friend_state(&g_state);
-  send_push_registration(&g_state);
+  load_friend_state(state);
+  send_push_registration(state);
 
-  g_state.loop_thread = std::thread([]() {
-    int rc = carrier_run(g_state.carrier, 10);
+  state->loop_thread = std::thread([state]() {
+    int rc = carrier_run(state->carrier, 10);
     if (rc != 0) {
       std::ostringstream msg;
       msg << "[beagle-sdk] carrier_run failed: 0x" << std::hex << carrier_get_error() << std::dec;
@@ -3334,28 +3364,43 @@ bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on
     }
   });
 
+  state_ = state;
+  owned_state.release();
   return true;
 }
 
 void BeagleSdk::stop() {
-  if (!g_state.carrier) return;
-  carrier_filetransfer_cleanup(g_state.carrier);
-  carrier_kill(g_state.carrier);
-  if (g_state.loop_thread.joinable()) g_state.loop_thread.join();
+  RuntimeState* state = runtime_state_from_ptr(state_);
+  if (!state) return;
+  if (state->carrier) {
+    carrier_filetransfer_cleanup(state->carrier);
+    carrier_kill(state->carrier);
+    if (state->loop_thread.joinable()) state->loop_thread.join();
+  }
   {
     std::lock_guard<std::mutex> lock(g_ft_mu);
-    for (auto& it : g_transfers) {
-      if (it.second && it.second->source.is_open()) it.second->source.close();
-      if (it.second && it.second->target.is_open()) it.second->target.close();
-      if (it.first) carrier_filetransfer_close(it.first);
+    for (auto it = g_transfers.begin(); it != g_transfers.end();) {
+      const auto& ctx = it->second;
+      if (!ctx || ctx->state != state) {
+        ++it;
+        continue;
+      }
+      if (ctx->source.is_open()) ctx->source.close();
+      if (ctx->target.is_open()) ctx->target.close();
+      if (it->first) carrier_filetransfer_close(it->first);
+      it = g_transfers.erase(it);
     }
-    g_transfers.clear();
   }
-  g_state.carrier = nullptr;
+  state->carrier = nullptr;
+  state_ = nullptr;
+  user_id_.clear();
+  address_.clear();
+  delete state;
 }
 
 bool BeagleSdk::send_text(const std::string& peer, const std::string& text) {
-  return send_text_internal(peer, text, true);
+  RuntimeState* state = runtime_state_from_ptr(state_);
+  return send_text_internal(state, peer, text, true);
 }
 
 bool BeagleSdk::send_status(const std::string& peer,
@@ -3417,7 +3462,8 @@ bool BeagleSdk::send_status(const std::string& peer,
            + " state=" + normalized_state
            + " chat_type=" + normalized_chat_type
            + " ttl_ms=" + std::to_string(next_ttl_ms));
-  return send_text_internal(normalized_peer, wire_payload, false);
+  RuntimeState* state = runtime_state_from_ptr(state_);
+  return send_text_internal(state, normalized_peer, wire_payload, false);
 }
 
 bool BeagleSdk::send_media(const std::string& peer,
@@ -3427,7 +3473,8 @@ bool BeagleSdk::send_media(const std::string& peer,
                            const std::string& media_type,
                            const std::string& filename,
                            const std::string& out_format) {
-  if (!g_state.carrier) return false;
+  RuntimeState* state = runtime_state_from_ptr(state_);
+  if (!state || !state->carrier) return false;
 
   if (media_path.empty()) {
     std::string payload;
@@ -3444,7 +3491,7 @@ bool BeagleSdk::send_media(const std::string& peer,
       if (!payload.empty()) payload += "\n";
       payload += "mediaType: " + media_type;
     }
-    return send_text_internal(peer, payload, false);
+    return send_text_internal(state, peer, payload, false);
   }
 
   unsigned long long size = file_size_bytes(media_path);
@@ -3516,9 +3563,9 @@ bool BeagleSdk::send_media(const std::string& peer,
     use_legacy_inline = false;
   }
   if (out_mode == "auto") {
-    std::lock_guard<std::mutex> lock(g_state.state_mu);
-    auto it = g_state.peer_media_payload_hint.find(peer);
-    if (it != g_state.peer_media_payload_hint.end()) {
+    std::lock_guard<std::mutex> lock(state->state_mu);
+    auto it = state->peer_media_payload_hint.find(peer);
+    if (it != state->peer_media_payload_hint.end()) {
       if (it->second == "swift-json") {
         use_packed = false;
         use_swift_json = true;
@@ -3543,7 +3590,7 @@ bool BeagleSdk::send_media(const std::string& peer,
   }
 
   bool peer_online_known = false;
-  bool peer_online = is_friend_online(&g_state, peer, peer_online_known);
+  bool peer_online = is_friend_online(state, peer, peer_online_known);
   if (try_filetransfer_first && peer_online_known && !peer_online) {
     if (force_filetransfer) {
       // In force mode, do not trust cached friend presence enough to abort.
@@ -3571,7 +3618,7 @@ bool BeagleSdk::send_media(const std::string& peer,
       int v = std::atoi(wait_send_env);
       if (v >= 1000 && v <= 120000) wait_send_ms = v;
     }
-    if (send_media_via_filetransfer(&g_state,
+    if (send_media_via_filetransfer(state,
                                     peer,
                                     media_path,
                                     send_filename,
@@ -3632,7 +3679,7 @@ bool BeagleSdk::send_media(const std::string& peer,
   }
 
   uint32_t msgid = 0;
-  int rc = carrier_send_friend_message(g_state.carrier,
+  int rc = carrier_send_friend_message(state->carrier,
                                        peer.c_str(),
                                        payload_ptr,
                                        payload_len,
@@ -3642,7 +3689,7 @@ bool BeagleSdk::send_media(const std::string& peer,
   if (rc < 0) {
     int err = carrier_get_error();
     std::string detail;
-    if (post_payload_to_express_node(&g_state, peer, payload_ptr, payload_len, detail)) {
+    if (post_payload_to_express_node(state, peer, payload_ptr, payload_len, detail)) {
       log_line(std::string("[beagle-sdk] send_media(") + payload_mode
                + ") express fallback ok peer="
                + peer + " file=" + send_filename
@@ -3677,8 +3724,10 @@ bool BeagleSdk::send_media(const std::string& peer,
 
 #if !BEAGLE_SDK_STUB
 BeagleStatus BeagleSdk::status() const {
-  std::lock_guard<std::mutex> lock(g_state.state_mu);
-  return g_state.status;
+  RuntimeState* state = runtime_state_from_ptr(state_);
+  if (!state) return {};
+  std::lock_guard<std::mutex> lock(state->state_mu);
+  return state->status;
 }
 #endif
 
