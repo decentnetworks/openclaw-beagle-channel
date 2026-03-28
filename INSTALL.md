@@ -44,6 +44,7 @@ sudo apt install -y \
     autoconf \
     automake \
     libtool \
+    libncurses5-dev \
     git
 ```
 
@@ -83,6 +84,7 @@ git checkout fix/express-offline-watermark-replay
 ```bash
 mkdir -p build/linux
 cd build/linux
+sudo apt-get install libncurses5-dev
 
 cmake ../.. \
     -DCMAKE_BUILD_TYPE=Release \
