@@ -58,7 +58,18 @@ if(NOT BEAGLE_SDK_STUB)
     ${BEAGLE_SDK_INTERMEDIATE_DIR}/lib
   )
 
-  target_link_libraries(beagle-sidecar PRIVATE carrier carriersession carrierfiletrans config crystal)
+  # carriersession is only used transitively via carrierfiletrans; with GNU ld --as-needed
+  # it would be omitted from DT_NEEDED, and libcarrierfiletrans's RUNPATH (/usr/local/lib)
+  # would not locate libcarriersession.so. Force a direct NEEDED so BUILD_RPATH applies.
+  if(APPLE)
+    target_link_libraries(beagle-sidecar PRIVATE carrier carriersession carrierfiletrans config crystal)
+  else()
+    target_link_libraries(beagle-sidecar PRIVATE
+      -Wl,--push-state,--no-as-needed
+      carriersession
+      -Wl,--pop-state
+      carrier carrierfiletrans config crystal)
+  endif()
 
   set_target_properties(beagle-sidecar PROPERTIES
     BUILD_RPATH "${BEAGLE_SDK_BUILD_DIR}/src/carrier;${BEAGLE_SDK_BUILD_DIR}/src/session;${BEAGLE_SDK_BUILD_DIR}/src/filetransfer;${BEAGLE_SDK_INTERMEDIATE_DIR}/lib"

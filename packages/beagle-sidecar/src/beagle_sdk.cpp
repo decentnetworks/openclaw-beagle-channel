@@ -181,6 +181,8 @@ struct PushPeerNotifyState {
   long long last_sent_ts = 0;
 };
 
+struct RuntimeState;
+
 struct MessageReceiptContext {
   RuntimeState* state = nullptr;
   std::string peer;
@@ -3462,8 +3464,8 @@ bool BeagleSdk::send_status(const std::string& peer,
            + " state=" + normalized_state
            + " chat_type=" + normalized_chat_type
            + " ttl_ms=" + std::to_string(next_ttl_ms));
-  RuntimeState* state = runtime_state_from_ptr(state_);
-  return send_text_internal(state, normalized_peer, wire_payload, false);
+  RuntimeState* rt_state = runtime_state_from_ptr(state_);
+  return send_text_internal(rt_state, normalized_peer, wire_payload, false);
 }
 
 bool BeagleSdk::send_media(const std::string& peer,
