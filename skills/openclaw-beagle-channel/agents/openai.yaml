@@ -1,0 +1,7 @@
+interface:
+  display_name: "Beagle Chat for OpenClaw"
+  short_description: "Install and operate Beagle Chat for OpenClaw"
+  icon_small: "./assets/beagle-chat-logo.svg"
+  icon_large: "./assets/beagle-chat-logo.svg"
+  brand_color: "#B57B3A"
+  default_prompt: "Use $openclaw-beagle-channel to set up, debug, or package the Beagle Chat OpenClaw integration."
