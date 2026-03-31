@@ -57,6 +57,12 @@ bool BeagleSdk::send_text(const std::string& peer, const std::string& text) {
   return true;
 }
 
+bool BeagleSdk::add_friend(const std::string& address, const std::string& hello) {
+  std::cerr << "[beagle-sdk] add_friend stub. address=" << address
+            << " hello=" << hello << "\n";
+  return !address.empty();
+}
+
 bool BeagleSdk::send_media(const std::string& peer,
                            const std::string& caption,
                            const std::string& media_path,
@@ -3403,6 +3409,28 @@ void BeagleSdk::stop() {
 bool BeagleSdk::send_text(const std::string& peer, const std::string& text) {
   RuntimeState* state = runtime_state_from_ptr(state_);
   return send_text_internal(state, peer, text, true);
+}
+
+bool BeagleSdk::add_friend(const std::string& address, const std::string& hello) {
+  RuntimeState* state = runtime_state_from_ptr(state_);
+  std::string target = trim_copy(address);
+  std::string greeting = trim_copy(hello);
+  if (!state || !state->carrier || target.empty()) return false;
+  if (greeting.empty()) greeting = "openclaw-beagle-channel";
+  int rc = carrier_add_friend(state->carrier, target.c_str(), greeting.c_str());
+  if (rc == 0) {
+    log_line(std::string("[beagle-sdk] add_friend ok address=") + target);
+    return true;
+  }
+  if (carrier_get_error() == ERROR_ALREADY_EXIST) {
+    log_line(std::string("[beagle-sdk] add_friend already-exists address=") + target);
+    return true;
+  }
+  std::ostringstream msg;
+  msg << "[beagle-sdk] add_friend failed address=" << target
+      << " err=0x" << std::hex << carrier_get_error() << std::dec;
+  log_line(msg.str());
+  return false;
 }
 
 bool BeagleSdk::send_status(const std::string& peer,

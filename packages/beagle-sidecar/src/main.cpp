@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -610,6 +611,8 @@ struct ServerOptions {
   std::string data_dir = "./data";
   std::string config_path;
   std::string openclaw_config_path;
+  std::string directory_address;
+  std::string directory_hello = "openclaw-beagle-channel";
 };
 
 static ServerOptions parse_args(int argc, char** argv) {
@@ -626,6 +629,10 @@ static ServerOptions parse_args(int argc, char** argv) {
       opts.config_path = argv[++i];
     } else if (arg == "--openclaw-config" && i + 1 < argc) {
       opts.openclaw_config_path = argv[++i];
+    } else if (arg == "--directory-address" && i + 1 < argc) {
+      opts.directory_address = argv[++i];
+    } else if (arg == "--directory-hello" && i + 1 < argc) {
+      opts.directory_hello = argv[++i];
     }
   }
   return opts;
@@ -661,6 +668,22 @@ static std::string resolve_openclaw_config_path(const ServerOptions& opts) {
   return "";
 }
 
+static std::string resolve_directory_address(const ServerOptions& opts) {
+  if (!trim_copy(opts.directory_address).empty()) return trim_copy(opts.directory_address);
+  std::string env_addr = get_env("BEAGLE_DIRECTORY_ADDRESS");
+  if (env_addr.empty()) env_addr = get_env("OPENCLAW_DIRECTORY_ADDRESS");
+  return trim_copy(env_addr);
+}
+
+static std::string resolve_directory_hello(const ServerOptions& opts) {
+  if (!trim_copy(opts.directory_hello).empty()) return trim_copy(opts.directory_hello);
+  std::string env_hello = get_env("BEAGLE_DIRECTORY_HELLO");
+  if (env_hello.empty()) env_hello = get_env("OPENCLAW_DIRECTORY_HELLO");
+  env_hello = trim_copy(env_hello);
+  if (env_hello.empty()) env_hello = "openclaw-beagle-channel";
+  return env_hello;
+}
+
 static std::string account_data_dir(const std::string& base_data_dir,
                                     const std::string& account_id,
                                     bool multi_account) {
@@ -685,6 +708,8 @@ int main(int argc, char** argv) {
   }
 
   std::string openclaw_config_path = resolve_openclaw_config_path(opts);
+  std::string directory_address = resolve_directory_address(opts);
+  std::string directory_hello = resolve_directory_hello(opts);
   std::vector<AgentProfile> agent_profiles;
   if (!openclaw_config_path.empty() && file_exists(openclaw_config_path)) {
     agent_profiles = load_agent_profiles_from_openclaw_config(openclaw_config_path);
@@ -746,6 +771,28 @@ int main(int argc, char** argv) {
              + " user_id=" + runtime->sdk->userid()
              + " address=" + runtime->sdk->address());
     accounts.emplace(account_id, std::move(runtime));
+    if (!directory_address.empty()) {
+      AccountRuntime* started = accounts[account_id].get();
+      std::thread([started, account_id, directory_address, directory_hello]() {
+        // Carrier add-friend can return NOT_BEING_READY during bootstrap.
+        // Retry for a short window so startup is robust.
+        for (int attempt = 1; attempt <= 12; ++attempt) {
+          if (!started || !started->sdk) return;
+          BeagleStatus st = started->sdk->status();
+          if (!st.ready) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            continue;
+          }
+          bool added = started->sdk->add_friend(directory_address, directory_hello);
+          log_line(std::string("[sidecar] directory friend add account=") + account_id
+                   + " address=" + directory_address
+                   + " attempt=" + std::to_string(attempt)
+                   + " result=" + (added ? "ok" : "failed"));
+          if (added) return;
+          std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+      }).detach();
+    }
   }
 
   if (accounts.empty()) {
@@ -1010,6 +1057,33 @@ int main(int argc, char** argv) {
                                           group_name,
                                           seq);
       send_response(client_fd, ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+    } else if (method == "POST" && path == "/addFriend") {
+      if (!account) {
+        send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"unknown_account\"}");
+        close(client_fd);
+        continue;
+      }
+      std::string address;
+      std::string hello;
+      extract_json_string(body, "address", address);
+      if (trim_copy(address).empty()) extract_json_string(body, "peer", address);
+      extract_json_string(body, "hello", hello);
+      if (trim_copy(hello).empty()) hello = "openclaw-beagle-channel";
+
+      if (trim_copy(address).empty()) {
+        send_response(client_fd, 400, "application/json", "{\"ok\":false,\"error\":\"missing_address\"}");
+        close(client_fd);
+        continue;
+      }
+
+      log_line(std::string("[sidecar] /addFriend account=") + account->account_id
+               + " address=" + address);
+      bool ok = account->sdk->add_friend(address, hello);
+      if (ok) {
+        send_response(client_fd, 200, "application/json", "{\"ok\":true}");
+      } else {
+        send_response(client_fd, 500, "application/json", "{\"ok\":false,\"error\":\"add_friend_failed\"}");
+      }
     } else {
       send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"not_found\"}");
     }

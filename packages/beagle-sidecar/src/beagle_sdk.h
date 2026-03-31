@@ -53,6 +53,7 @@ public:
   void stop();
 
   bool send_text(const std::string& peer, const std::string& text);
+  bool add_friend(const std::string& address, const std::string& hello);
   bool send_media(const std::string& peer,
                   const std::string& caption,
                   const std::string& media_path,

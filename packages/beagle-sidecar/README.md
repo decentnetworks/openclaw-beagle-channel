@@ -64,7 +64,8 @@ Multi-agent mode (auto-discover OpenClaw agents and allocate one Carrier identit
 ./build/beagle-sidecar \
   --config $BEAGLE_SDK_ROOT/config/carrier.conf \
   --data-dir ~/.carrier \
-  --openclaw-config ~/.openclaw/openclaw.json
+  --openclaw-config ~/.openclaw/openclaw.json \
+  --directory-address bKaapxLjDGwuCZ7oohVFMVbcHWFYy7yNVGXkVSVL8AkAxbokCGi2
 ```
 
 If `--openclaw-config` is omitted, sidecar checks:
@@ -75,6 +76,13 @@ If `--openclaw-config` is omitted, sidecar checks:
 
 When agents are discovered, sidecar starts one account per agent and uses agent metadata
 (`name`, `description`, `gender`, `phone`, `email`, `region`) to populate Carrier self userinfo.
+
+Optional OpenClaw Directory friend bootstrap:
+
+- `--directory-address <carrier_address>`: auto-send add-friend request at startup for each account.
+- `--directory-hello <text>`: custom hello text (default: `openclaw-beagle-channel`).
+- Env fallback: `BEAGLE_DIRECTORY_ADDRESS` / `OPENCLAW_DIRECTORY_ADDRESS`, and
+  `BEAGLE_DIRECTORY_HELLO` / `OPENCLAW_DIRECTORY_HELLO`.
 
 ## Multi-Agent Routing (What Was Asked vs Implemented)
 
@@ -109,6 +117,17 @@ How to use with your `main` + `beagle-profile` agents:
    - `curl -s http://127.0.0.1:39091/health`
 4. Configure `channels.beagle.accounts` in OpenClaw so account IDs match agent accounts
 5. Ensure routing bindings map beagle account/peer to the intended agent (verify again with `--bindings`)
+
+Manual add-friend API (runtime, no restart):
+
+```bash
+curl -s -X POST http://127.0.0.1:39091/addFriend \
+  -H "Content-Type: application/json" \
+  -H "X-Beagle-Account: default" \
+  -d '{"address":"bKaapxLjDGwuCZ7oohVFMVbcHWFYy7yNVGXkVSVL8AkAxbokCGi2","hello":"openclaw-beagle-channel"}'
+```
+
+`address` is required (alias: `peer`); `hello` is optional.
 
 You can also use the helper script:
 
