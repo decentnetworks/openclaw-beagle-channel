@@ -63,6 +63,10 @@ bool BeagleSdk::add_friend(const std::string& address, const std::string& hello)
   return !address.empty();
 }
 
+std::string BeagleSdk::id_from_address(const std::string& address) const {
+  return address;
+}
+
 bool BeagleSdk::send_media(const std::string& peer,
                            const std::string& caption,
                            const std::string& media_path,
@@ -3431,6 +3435,14 @@ bool BeagleSdk::add_friend(const std::string& address, const std::string& hello)
       << " err=0x" << std::hex << carrier_get_error() << std::dec;
   log_line(msg.str());
   return false;
+}
+
+std::string BeagleSdk::id_from_address(const std::string& address) const {
+  std::string target = trim_copy(address);
+  if (target.empty()) return "";
+  char idbuf[CARRIER_MAX_ID_LEN + 1] = {0};
+  if (!carrier_get_id_by_address(target.c_str(), idbuf, sizeof(idbuf))) return "";
+  return std::string(idbuf);
 }
 
 bool BeagleSdk::send_status(const std::string& peer,

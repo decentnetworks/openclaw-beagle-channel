@@ -684,6 +684,18 @@ static std::string resolve_directory_hello(const ServerOptions& opts) {
   return env_hello;
 }
 
+static std::string resolve_openclaw_version() {
+  std::string v = trim_copy(get_env("OPENCLAW_VERSION"));
+  if (!v.empty()) return v;
+  return "unknown";
+}
+
+static std::string resolve_beagle_channel_version() {
+  std::string v = trim_copy(get_env("BEAGLE_CHANNEL_VERSION"));
+  if (!v.empty()) return v;
+  return "unknown";
+}
+
 static std::string account_data_dir(const std::string& base_data_dir,
                                     const std::string& account_id,
                                     bool multi_account) {
@@ -710,6 +722,8 @@ int main(int argc, char** argv) {
   std::string openclaw_config_path = resolve_openclaw_config_path(opts);
   std::string directory_address = resolve_directory_address(opts);
   std::string directory_hello = resolve_directory_hello(opts);
+  std::string openclaw_version = resolve_openclaw_version();
+  std::string beagle_channel_version = resolve_beagle_channel_version();
   std::vector<AgentProfile> agent_profiles;
   if (!openclaw_config_path.empty() && file_exists(openclaw_config_path)) {
     agent_profiles = load_agent_profiles_from_openclaw_config(openclaw_config_path);
@@ -773,7 +787,12 @@ int main(int argc, char** argv) {
     accounts.emplace(account_id, std::move(runtime));
     if (!directory_address.empty()) {
       AccountRuntime* started = accounts[account_id].get();
-      std::thread([started, account_id, directory_address, directory_hello]() {
+      std::thread([started,
+                   account_id,
+                   directory_address,
+                   directory_hello,
+                   openclaw_version,
+                   beagle_channel_version]() {
         // Carrier add-friend can return NOT_BEING_READY during bootstrap.
         // Retry for a short window so startup is robust.
         for (int attempt = 1; attempt <= 12; ++attempt) {
@@ -788,6 +807,10 @@ int main(int argc, char** argv) {
                    + " address=" + directory_address
                    + " attempt=" + std::to_string(attempt)
                    + " result=" + (added ? "ok" : "failed"));
+          if (added) {
+            log_line(std::string("[sidecar] directory friend added; metadata push is manual via /addFriend account=")
+                     + account_id + " address=" + directory_address);
+          }
           if (added) return;
           std::this_thread::sleep_for(std::chrono::seconds(2));
         }
@@ -1080,6 +1103,31 @@ int main(int argc, char** argv) {
                + " address=" + address);
       bool ok = account->sdk->add_friend(address, hello);
       if (ok) {
+        std::string peer_userid = account->sdk->id_from_address(address);
+        if (peer_userid.empty()) {
+          log_line(std::string("[sidecar] /addFriend cannot derive userid from address=") + address);
+          send_response(client_fd, 500, "application/json",
+                        "{\"ok\":false,\"error\":\"cannot_derive_userid\"}");
+          close(client_fd);
+          continue;
+        }
+        std::string profile_payload = std::string("{\"profile\":{\"address\":\"")
+            + json_escape(account->sdk->address())
+            + "\",\"agentName\":\"" + json_escape(account->agent_name)
+            + "\",\"openclawVersion\":\"" + json_escape(openclaw_version)
+            + "\",\"beagleChannelVersion\":\"" + json_escape(beagle_channel_version)
+            + "\"}}";
+        bool profile_ok = false;
+        for (int push_attempt = 1; push_attempt <= 6; ++push_attempt) {
+          profile_ok = account->sdk->send_text(peer_userid, profile_payload);
+          log_line(std::string("[sidecar] /addFriend profile push account=") + account->account_id
+                   + " address=" + address
+                   + " peer=" + peer_userid
+                   + " attempt=" + std::to_string(push_attempt)
+                   + " result=" + (profile_ok ? "ok" : "failed"));
+          if (profile_ok) break;
+          std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
         send_response(client_fd, 200, "application/json", "{\"ok\":true}");
       } else {
         send_response(client_fd, 500, "application/json", "{\"ok\":false,\"error\":\"add_friend_failed\"}");
