@@ -55,6 +55,7 @@ public:
   bool send_text(const std::string& peer, const std::string& text);
   bool add_friend(const std::string& address, const std::string& hello);
   std::string id_from_address(const std::string& address) const;
+  bool friend_is_online(const std::string& userid) const;
   bool send_media(const std::string& peer,
                   const std::string& caption,
                   const std::string& media_path,

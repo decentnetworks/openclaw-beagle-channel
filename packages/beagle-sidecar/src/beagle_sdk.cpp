@@ -67,6 +67,11 @@ std::string BeagleSdk::id_from_address(const std::string& address) const {
   return address;
 }
 
+bool BeagleSdk::friend_is_online(const std::string& userid) const {
+  (void)userid;
+  return true;
+}
+
 bool BeagleSdk::send_media(const std::string& peer,
                            const std::string& caption,
                            const std::string& media_path,
@@ -3443,6 +3448,16 @@ std::string BeagleSdk::id_from_address(const std::string& address) const {
   char idbuf[CARRIER_MAX_ID_LEN + 1] = {0};
   if (!carrier_get_id_by_address(target.c_str(), idbuf, sizeof(idbuf))) return "";
   return std::string(idbuf);
+}
+
+bool BeagleSdk::friend_is_online(const std::string& userid) const {
+  RuntimeState* state = runtime_state_from_ptr(state_);
+  std::string peer = trim_copy(userid);
+  if (!state || !state->carrier || peer.empty()) return false;
+  CarrierFriendInfo info;
+  std::memset(&info, 0, sizeof(info));
+  if (carrier_get_friend_info(state->carrier, peer.c_str(), &info) < 0) return false;
+  return info.status == CarrierConnectionStatus_Connected;
 }
 
 bool BeagleSdk::send_status(const std::string& peer,

@@ -711,6 +711,18 @@ static std::string requested_account_id(const std::string& headers, const std::s
   return sanitize_account_id(account_id);
 }
 
+static std::string build_directory_profile_payload(const AccountRuntime* runtime,
+                                                   const std::string& openclaw_version,
+                                                   const std::string& beagle_channel_version) {
+  if (!runtime || !runtime->sdk) return "";
+  return std::string("{\"profile\":{\"address\":\"")
+      + json_escape(runtime->sdk->address())
+      + "\",\"agentName\":\"" + json_escape(runtime->agent_name)
+      + "\",\"openclawVersion\":\"" + json_escape(openclaw_version)
+      + "\",\"beagleChannelVersion\":\"" + json_escape(beagle_channel_version)
+      + "\"}}";
+}
+
 int main(int argc, char** argv) {
   ServerOptions opts = parse_args(argc, argv);
   std::string config_path = resolve_config_path(opts);
@@ -808,8 +820,37 @@ int main(int argc, char** argv) {
                    + " attempt=" + std::to_string(attempt)
                    + " result=" + (added ? "ok" : "failed"));
           if (added) {
-            log_line(std::string("[sidecar] directory friend added; metadata push is manual via /addFriend account=")
-                     + account_id + " address=" + directory_address);
+            std::string directory_userid = started->sdk->id_from_address(directory_address);
+            if (directory_userid.empty()) {
+              log_line(std::string("[sidecar] directory friend added but cannot derive userid account=")
+                       + account_id + " address=" + directory_address);
+              return;
+            }
+            std::string profile_payload = build_directory_profile_payload(
+                started, openclaw_version, beagle_channel_version);
+            // Send metadata only after directory friend is online for first time.
+            for (int wait_attempt = 1; wait_attempt <= 120; ++wait_attempt) {
+              if (!started || !started->sdk) return;
+              if (!started->sdk->friend_is_online(directory_userid)) {
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                continue;
+              }
+              bool profile_ok = false;
+              for (int push_attempt = 1; push_attempt <= 6; ++push_attempt) {
+                profile_ok = started->sdk->send_text(directory_userid, profile_payload);
+                log_line(std::string("[sidecar] directory auto profile push account=") + account_id
+                         + " address=" + directory_address
+                         + " peer=" + directory_userid
+                         + " wait_attempt=" + std::to_string(wait_attempt)
+                         + " push_attempt=" + std::to_string(push_attempt)
+                         + " result=" + (profile_ok ? "ok" : "failed"));
+                if (profile_ok) return;
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+              }
+              std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+            log_line(std::string("[sidecar] directory auto profile push timeout account=")
+                     + account_id + " address=" + directory_address + " peer=" + directory_userid);
           }
           if (added) return;
           std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -1111,12 +1152,8 @@ int main(int argc, char** argv) {
           close(client_fd);
           continue;
         }
-        std::string profile_payload = std::string("{\"profile\":{\"address\":\"")
-            + json_escape(account->sdk->address())
-            + "\",\"agentName\":\"" + json_escape(account->agent_name)
-            + "\",\"openclawVersion\":\"" + json_escape(openclaw_version)
-            + "\",\"beagleChannelVersion\":\"" + json_escape(beagle_channel_version)
-            + "\"}}";
+        std::string profile_payload = build_directory_profile_payload(
+            account, openclaw_version, beagle_channel_version);
         bool profile_ok = false;
         for (int push_attempt = 1; push_attempt <= 6; ++push_attempt) {
           profile_ok = account->sdk->send_text(peer_userid, profile_payload);
