@@ -84,7 +84,14 @@ Optional OpenClaw Directory friend bootstrap:
 - Env fallback: `BEAGLE_DIRECTORY_ADDRESS` / `OPENCLAW_DIRECTORY_ADDRESS`, and
   `BEAGLE_DIRECTORY_HELLO` / `OPENCLAW_DIRECTORY_HELLO`.
 
-After the directory is added as a friend, the sidecar waits until that friend is **online**, then sends a one-time JSON profile message to the directory (Carrier address, agent display name from OpenClaw config, and optional `OPENCLAW_VERSION` / `BEAGLE_CHANNEL_VERSION` env strings). You do not need to call `/addFriend` manually for that flow unless you want to retry.
+If you omit `--directory-address` (and the env fallbacks are empty), the sidecar adds both built-in default directories as friends:
+- `bKaapxLjDGwuCZ7oohVFMVbcHWFYy7yNVGXkVSVL8AkAxbokCGi2`
+- `C5WWd6BpDvZmqVysfKZWFitK2B7XJJy9dwXVH12KGK62dk2RdKUt`
+
+If you provide `--directory-address`, only that single address is used instead of the defaults.
+The sidecar skips adding itself when its own Carrier address matches a directory address.
+
+After the directory is added as a friend, the sidecar waits until that friend is **online**, then sends a one-time JSON profile message containing the Carrier address, agent name, OpenClaw version, host name, and host IP.
 
 ## Multi-Agent Routing (What Was Asked vs Implemented)
 

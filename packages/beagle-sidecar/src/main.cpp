@@ -1,6 +1,8 @@
 #include "beagle_sdk.h"
 
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -373,6 +375,20 @@ static size_t skip_json_value(const std::string& body, size_t pos) {
   return pos;
 }
 
+static bool is_reserved_agent_key(const std::string& key) {
+  static const char* reserved[] = {
+    "defaults", "default", "list", "models", "meta", "wizard",
+    "plugins", "gateway", "auth", "channels", "session", nullptr
+  };
+  std::string lower = key;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  for (const char** p = reserved; *p; ++p) {
+    if (lower == *p) return true;
+  }
+  return false;
+}
+
 static void parse_agent_object_map(const std::string& object_body, std::vector<AgentProfile>& out) {
   if (object_body.empty() || object_body.front() != '{') return;
   size_t pos = 1;
@@ -393,10 +409,12 @@ static void parse_agent_object_map(const std::string& object_body, std::vector<A
     if (object_body[pos] == '{') {
       size_t obj_end = pos;
       if (!find_matching_json_bracket(object_body, pos, '{', '}', obj_end)) break;
-      AgentProfile profile = parse_agent_profile_from_object(
-          object_body.substr(pos, obj_end - pos + 1),
-          sanitize_account_id(key));
-      if (!profile.account_id.empty()) out.push_back(std::move(profile));
+      if (!is_reserved_agent_key(key)) {
+        AgentProfile profile = parse_agent_profile_from_object(
+            object_body.substr(pos, obj_end - pos + 1),
+            sanitize_account_id(key));
+        if (!profile.account_id.empty()) out.push_back(std::move(profile));
+      }
       pos = obj_end + 1;
     } else {
       size_t next = skip_json_value(object_body, pos);
@@ -711,15 +729,41 @@ static std::string requested_account_id(const std::string& headers, const std::s
   return sanitize_account_id(account_id);
 }
 
+static std::string get_hostname() {
+  char buf[256] = {};
+  if (gethostname(buf, sizeof(buf) - 1) == 0) return std::string(buf);
+  return "";
+}
+
+static std::string get_local_ip_address() {
+  struct ifaddrs* ifaddr = nullptr;
+  if (getifaddrs(&ifaddr) == -1) return "";
+  std::string result;
+  for (struct ifaddrs* ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+    if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+    char host[NI_MAXHOST];
+    if (getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in),
+                    host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) != 0) continue;
+    std::string addr(host);
+    if (addr != "127.0.0.1") { result = addr; break; }
+  }
+  freeifaddrs(ifaddr);
+  return result;
+}
+
 static std::string build_directory_profile_payload(const AccountRuntime* runtime,
                                                    const std::string& openclaw_version,
                                                    const std::string& beagle_channel_version) {
   if (!runtime || !runtime->sdk) return "";
+  std::string host_name = get_hostname();
+  std::string host_ip = get_local_ip_address();
   return std::string("{\"profile\":{\"address\":\"")
       + json_escape(runtime->sdk->address())
       + "\",\"agentName\":\"" + json_escape(runtime->agent_name)
       + "\",\"openclawVersion\":\"" + json_escape(openclaw_version)
       + "\",\"beagleChannelVersion\":\"" + json_escape(beagle_channel_version)
+      + "\",\"hostName\":\"" + json_escape(host_name)
+      + "\",\"hostIp\":\"" + json_escape(host_ip)
       + "\"}}";
 }
 
@@ -797,66 +841,6 @@ int main(int argc, char** argv) {
              + " user_id=" + runtime->sdk->userid()
              + " address=" + runtime->sdk->address());
     accounts.emplace(account_id, std::move(runtime));
-    if (!directory_address.empty()) {
-      AccountRuntime* started = accounts[account_id].get();
-      std::thread([started,
-                   account_id,
-                   directory_address,
-                   directory_hello,
-                   openclaw_version,
-                   beagle_channel_version]() {
-        // Carrier add-friend can return NOT_BEING_READY during bootstrap.
-        // Retry for a short window so startup is robust.
-        for (int attempt = 1; attempt <= 12; ++attempt) {
-          if (!started || !started->sdk) return;
-          BeagleStatus st = started->sdk->status();
-          if (!st.ready) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
-            continue;
-          }
-          bool added = started->sdk->add_friend(directory_address, directory_hello);
-          log_line(std::string("[sidecar] directory friend add account=") + account_id
-                   + " address=" + directory_address
-                   + " attempt=" + std::to_string(attempt)
-                   + " result=" + (added ? "ok" : "failed"));
-          if (added) {
-            std::string directory_userid = started->sdk->id_from_address(directory_address);
-            if (directory_userid.empty()) {
-              log_line(std::string("[sidecar] directory friend added but cannot derive userid account=")
-                       + account_id + " address=" + directory_address);
-              return;
-            }
-            std::string profile_payload = build_directory_profile_payload(
-                started, openclaw_version, beagle_channel_version);
-            // Send metadata only after directory friend is online for first time.
-            for (int wait_attempt = 1; wait_attempt <= 120; ++wait_attempt) {
-              if (!started || !started->sdk) return;
-              if (!started->sdk->friend_is_online(directory_userid)) {
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-                continue;
-              }
-              bool profile_ok = false;
-              for (int push_attempt = 1; push_attempt <= 6; ++push_attempt) {
-                profile_ok = started->sdk->send_text(directory_userid, profile_payload);
-                log_line(std::string("[sidecar] directory auto profile push account=") + account_id
-                         + " address=" + directory_address
-                         + " peer=" + directory_userid
-                         + " wait_attempt=" + std::to_string(wait_attempt)
-                         + " push_attempt=" + std::to_string(push_attempt)
-                         + " result=" + (profile_ok ? "ok" : "failed"));
-                if (profile_ok) return;
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-              }
-              std::this_thread::sleep_for(std::chrono::seconds(2));
-            }
-            log_line(std::string("[sidecar] directory auto profile push timeout account=")
-                     + account_id + " address=" + directory_address + " peer=" + directory_userid);
-          }
-          if (added) return;
-          std::this_thread::sleep_for(std::chrono::seconds(2));
-        }
-      }).detach();
-    }
   }
 
   if (accounts.empty()) {
@@ -869,6 +853,93 @@ int main(int argc, char** argv) {
     default_account_id = "default";
   } else if (!accounts.empty()) {
     default_account_id = accounts.begin()->first;
+  }
+
+  // ── Directory auto-bootstrap ─────────────────────────────────────
+  //
+  // Two default directory addresses; both are added as friends so
+  // agents can register with whichever directory is online.
+  const std::string DEFAULT_DIR_1 = "bKaapxLjDGwuCZ7oohVFMVbcHWFYy7yNVGXkVSVL8AkAxbokCGi2";
+  const std::string DEFAULT_DIR_2 = "C5WWd6BpDvZmqVysfKZWFitK2B7XJJy9dwXVH12KGK62dk2RdKUt";
+
+  std::vector<std::string> dir_addresses;
+  if (!trim_copy(directory_address).empty()) {
+    dir_addresses.push_back(trim_copy(directory_address));
+  } else {
+    dir_addresses.push_back(DEFAULT_DIR_1);
+    dir_addresses.push_back(DEFAULT_DIR_2);
+  }
+
+  for (auto& kv : accounts) {
+    const std::string account_id = kv.first;
+    AccountRuntime* started = kv.second.get();
+    if (!started || !started->sdk) continue;
+
+    for (const std::string& dir_addr : dir_addresses) {
+      if (started->sdk->address() == dir_addr) continue;
+
+      std::thread([started,
+                   account_id,
+                   dir_addr,
+                   directory_hello,
+                   openclaw_version,
+                   beagle_channel_version]() {
+        for (int attempt = 1; attempt <= 12; ++attempt) {
+          if (!started || !started->sdk) return;
+          BeagleStatus st = started->sdk->status();
+          if (!st.ready) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            continue;
+          }
+
+          bool added = started->sdk->add_friend(dir_addr, directory_hello);
+          log_line(std::string("[sidecar] directory friend add account=") + account_id
+                   + " address=" + dir_addr
+                   + " attempt=" + std::to_string(attempt)
+                   + " result=" + (added ? "ok" : "failed"));
+
+          if (added) {
+            std::string dir_userid = started->sdk->id_from_address(dir_addr);
+            if (dir_userid.empty()) {
+              log_line(std::string("[sidecar] directory friend added but cannot derive userid account=")
+                       + account_id + " address=" + dir_addr);
+              return;
+            }
+
+            std::string profile_payload = build_directory_profile_payload(
+                started, openclaw_version, beagle_channel_version);
+
+            for (int wait_attempt = 1; wait_attempt <= 120; ++wait_attempt) {
+              if (!started || !started->sdk) return;
+              if (!started->sdk->friend_is_online(dir_userid)) {
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                continue;
+              }
+
+              bool profile_ok = false;
+              for (int push_attempt = 1; push_attempt <= 6; ++push_attempt) {
+                profile_ok = started->sdk->send_text(dir_userid, profile_payload);
+                log_line(std::string("[sidecar] directory auto profile push account=") + account_id
+                         + " address=" + dir_addr
+                         + " peer=" + dir_userid
+                         + " wait_attempt=" + std::to_string(wait_attempt)
+                         + " push_attempt=" + std::to_string(push_attempt)
+                         + " result=" + (profile_ok ? "ok" : "failed"));
+                if (profile_ok) return;
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+              }
+
+              std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+            log_line(std::string("[sidecar] directory auto profile push timeout account=")
+                     + account_id + " address=" + dir_addr + " peer=" + dir_userid);
+          }
+
+          if (added) return;
+          std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+      }).detach();
+    }
   }
 
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
