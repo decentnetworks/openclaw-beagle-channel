@@ -7,6 +7,7 @@ export type BeagleAccount = {
   trustedGroupAddresses?: string[];
   groupPeers?: string[];
   requireTrustedGroup?: boolean;
+  directoryToolsUrl?: string;
 };
 
 export type SidecarEvent = {
