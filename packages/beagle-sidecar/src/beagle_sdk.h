@@ -28,6 +28,7 @@ struct BeagleSdkOptions {
   std::string profile_description;
   std::string profile_region;
   std::string openclaw_agent_id;
+  bool emit_presence = false;
 };
 
 struct BeagleStatus {

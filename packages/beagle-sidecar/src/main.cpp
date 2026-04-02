@@ -631,6 +631,7 @@ struct ServerOptions {
   std::string openclaw_config_path;
   std::string directory_address;
   std::string directory_hello = "openclaw-beagle-channel";
+  bool emit_presence = false;
 };
 
 static ServerOptions parse_args(int argc, char** argv) {
@@ -651,6 +652,8 @@ static ServerOptions parse_args(int argc, char** argv) {
       opts.directory_address = argv[++i];
     } else if (arg == "--directory-hello" && i + 1 < argc) {
       opts.directory_hello = argv[++i];
+    } else if (arg == "--emit-presence") {
+      opts.emit_presence = true;
     }
   }
   return opts;
@@ -824,6 +827,7 @@ int main(int argc, char** argv) {
     sdk_opts.profile_description = profile.description;
     sdk_opts.profile_region = profile.region;
     sdk_opts.openclaw_agent_id = runtime->agent_id;
+    sdk_opts.emit_presence = opts.emit_presence || !get_env("BEAGLE_EMIT_PRESENCE").empty();
 
     const std::string callback_account = account_id;
     if (!runtime->sdk->start(sdk_opts, [callback_account](const BeagleIncomingMessage& msg) {

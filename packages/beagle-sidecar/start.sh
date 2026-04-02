@@ -35,6 +35,7 @@ Environment:
   BEAGLE_SIDECAR_TOKEN       Optional bearer token
   BEAGLE_DIRECTORY_ADDRESS   Optional directory Carrier address override
                              (defaults: both bKaapx...CGi2 and C5WWd6...dKUt)
+  BEAGLE_EMIT_PRESENCE       Set non-empty to emit friend online/offline events
   BEAGLE_SIDECAR_EXTRA_ARGS  Optional extra args (space-separated)
 EOF
 }
@@ -88,6 +89,9 @@ build_args() {
   fi
   if [[ -n "${BEAGLE_DIRECTORY_ADDRESS:-}" ]]; then
     ARGS+=(--directory-address "$BEAGLE_DIRECTORY_ADDRESS")
+  fi
+  if [[ -n "${BEAGLE_EMIT_PRESENCE:-}" ]]; then
+    ARGS+=(--emit-presence)
   fi
   if [[ -n "${BEAGLE_SIDECAR_EXTRA_ARGS:-}" ]]; then
     read -r -a EXTRA_ARGS <<<"$BEAGLE_SIDECAR_EXTRA_ARGS"

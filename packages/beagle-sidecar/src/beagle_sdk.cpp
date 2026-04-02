@@ -235,6 +235,7 @@ struct RuntimeState {
   std::string address;
   std::string self_display_name;
   int64_t startup_ts_us = 0;
+  bool emit_presence = false;
   BeagleStatus status;
   std::unordered_set<std::string> welcomed_peers;
   std::unordered_map<std::string, bool> peer_prefers_inline_media;
@@ -3098,17 +3099,23 @@ void friend_connection_callback(Carrier* carrier,
                                 void* context) {
   (void)carrier;
   auto* state = static_cast<RuntimeState*>(context);
+  bool is_online = (status == CarrierConnectionStatus_Connected);
   log_line(std::string("[beagle-sdk] friend ") + (friendid ? friendid : "")
-           + " is " + (status == CarrierConnectionStatus_Connected ? "online" : "offline"));
-  if (status == CarrierConnectionStatus_Connected && friendid) {
+           + " is " + (is_online ? "online" : "offline"));
+  if (is_online && friendid) {
     send_welcome_once(state, friendid, "online");
   }
   if (friendid) {
-    update_friend_status(state,
-                         friendid,
-                         status == CarrierConnectionStatus_Connected ? 1 : 0,
-                         -1,
-                         true);
+    update_friend_status(state, friendid, is_online ? 1 : 0, -1, true);
+
+    if (state->emit_presence && state->on_incoming) {
+      BeagleIncomingMessage ev;
+      ev.peer = friendid;
+      ev.text = std::string("{\"_event\":\"presence\",\"status\":\"")
+                + (is_online ? "online" : "offline") + "\"}";
+      ev.ts = static_cast<long long>(std::time(nullptr));
+      state->on_incoming(ev);
+    }
   }
 }
 
@@ -3318,6 +3325,7 @@ bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on
   callbacks.friend_invite = friend_invite_callback;
 
   state->on_incoming = std::move(on_incoming);
+  state->emit_presence = options.emit_presence;
   state->startup_ts_us = static_cast<int64_t>(std::time(nullptr)) * 1000000LL;
 
   Carrier* carrier = carrier_new(&opts, &callbacks, state);
