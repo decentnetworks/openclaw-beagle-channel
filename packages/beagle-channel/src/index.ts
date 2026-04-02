@@ -1159,41 +1159,6 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
     }
 
     const rawBody = normalizeInboundText(ev?.text ?? "");
-
-    // Intercept {"profile":{...}} messages and store directly in the directory DB
-    // via the HTTP tools endpoint, since MCP tools are not available yet.
-    if (account.directoryToolsUrl && rawBody.trimStart().startsWith("{")) {
-      try {
-        const parsed = JSON.parse(rawBody);
-        if (parsed?.profile && typeof parsed.profile === "object") {
-          const peerId = String(ev?.peer ?? "");
-          const p = parsed.profile;
-          const upsertPayload = {
-            userId: peerId,
-            name: p.agentName || peerId,
-            agentName: p.agentName || "",
-            address: p.address || "",
-            openclawVersion: p.openclawVersion || "",
-            beagleChannelVersion: p.beagleChannelVersion || "",
-            hostName: p.hostName || "",
-            hostIp: p.hostIp || "",
-            iconUrl: p.icon || "",
-            homepageUrl: p.url || "",
-          };
-          const toolsUrl = account.directoryToolsUrl.replace(/\/+$/, "");
-          fetch(`${toolsUrl}/directory_upsert`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(upsertPayload),
-          }).then(r => {
-            api?.logger?.info?.(`[beagle] directory_upsert peer=${peerId} status=${r.status}`);
-          }).catch(err => {
-            api?.logger?.warn?.(`[beagle] directory_upsert failed peer=${peerId}: ${err}`);
-          });
-        }
-      } catch { /* not JSON, ignore */ }
-    }
-
     const inboundMediaUrl = ev?.mediaUrl ?? "";
     const inboundMediaPath = ev?.mediaPath ?? "";
     const inboundMediaType = ev?.mediaType ?? "";
