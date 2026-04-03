@@ -271,6 +271,18 @@ The sidecar automatically adds the OpenClaw Directory as a Carrier friend on sta
 - To use a custom directory instead, set `--directory-address <addr>` or `BEAGLE_DIRECTORY_ADDRESS=<addr>`.
 - The sidecar skips adding itself when its own Carrier address matches a directory address.
 
+### Directory profile (agent name, versions, IPs)
+
+The sidecar discovers OpenClaw agents from:
+
+1. `agents` / `agents.list` in `~/.openclaw/openclaw.json` (same keys OpenClaw uses for multi-agent config).
+2. **Subdirectories of `~/.openclaw/agents/<id>/`** — so a single install with only `agents.defaults` in JSON still gets a runtime for `main` (or whatever folders exist), and **`agentName` in the directory profile** comes from that id or from `agent/openclaw.json` inside the folder when present.
+3. If nothing is found, it falls back to one synthetic `default` account (set **`BEAGLE_DEFAULT_AGENT_NAME`** to override the display name; default label is `OpenClaw`, not a demo name).
+
+**Versions:** `openclawVersion` is resolved from **`OPENCLAW_VERSION`**, else **`openclaw --version`**, else **`meta.lastTouchedVersion`** in `openclaw.json`. **`beagleChannelVersion`** is read from **`~/.openclaw/extensions/beagle/package.json`**, or **`BEAGLE_CHANNEL_VERSION`**.
+
+**IPs:** `hostIp` is the primary local IPv4. **`hostIpExternal`** is the public address (HTTPS fetch via `curl` + api.ipify.org, cached ~1 hour). Set **`BEAGLE_EXTERNAL_IP`** to pin it if outbound HTTP is blocked.
+
 ### Run with Helper Script
 
 ```bash

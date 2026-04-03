@@ -5,12 +5,16 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
+
+#include <dirent.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -503,6 +507,133 @@ static std::vector<AgentProfile> load_agent_profiles_from_openclaw_config(const 
   return out;
 }
 
+static bool profile_list_has_account_id(const std::vector<AgentProfile>& profiles,
+                                       const std::string& id) {
+  for (const auto& p : profiles) {
+    if (sanitize_account_id(p.account_id) == id) return true;
+    if (sanitize_account_id(p.agent_id) == id) return true;
+  }
+  return false;
+}
+
+static void merge_profiles_from_agents_dir(std::vector<AgentProfile>& profiles,
+                                          const std::string& home) {
+  if (home.empty()) return;
+  std::string base = home + "/.openclaw/agents";
+  DIR* d = opendir(base.c_str());
+  if (!d) return;
+  while (struct dirent* ent = readdir(d)) {
+    std::string name = ent->d_name;
+    if (name == "." || name == ".." || name.empty()) continue;
+    if (name[0] == '.') continue;
+    std::string sanitized = sanitize_account_id(name);
+    if (sanitized.empty()) continue;
+    if (profile_list_has_account_id(profiles, sanitized)) continue;
+    std::string full = base + "/" + name;
+    struct stat st;
+    if (stat(full.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+
+    AgentProfile ap;
+    ap.agent_id = sanitized;
+    ap.account_id = sanitized;
+    ap.name = sanitized;
+    std::string meta_path = full + "/agent/openclaw.json";
+    if (!file_exists(meta_path)) meta_path = full + "/openclaw.json";
+    std::string meta_body;
+    if (read_file_to_string(meta_path, meta_body)) {
+      std::string nm;
+      if (extract_json_string(meta_body, "name", nm) && !trim_copy(nm).empty()) {
+        ap.name = trim_copy(nm);
+      } else if (extract_json_string(meta_body, "displayName", nm) && !trim_copy(nm).empty()) {
+        ap.name = trim_copy(nm);
+      }
+    }
+    profiles.push_back(std::move(ap));
+  }
+  closedir(d);
+  std::sort(profiles.begin(), profiles.end(), [](const AgentProfile& a, const AgentProfile& b) {
+    return a.account_id < b.account_id;
+  });
+}
+
+static std::string exec_first_line(const char* cmd) {
+  FILE* p = popen(cmd, "r");
+  if (!p) return "";
+  char buf[512];
+  std::string out;
+  if (fgets(buf, sizeof(buf), p)) out = trim_copy(std::string(buf));
+  pclose(p);
+  return out;
+}
+
+static std::string parse_last_touched_version_from_openclaw_json(const std::string& body) {
+  const char* key = "\"lastTouchedVersion\"";
+  size_t pos = body.find(key);
+  if (pos == std::string::npos) return "";
+  pos = body.find(':', pos);
+  if (pos == std::string::npos) return "";
+  pos = body.find('"', pos);
+  if (pos == std::string::npos) return "";
+  ++pos;
+  size_t end = body.find('"', pos);
+  if (end == std::string::npos) return "";
+  return trim_copy(body.substr(pos, end - pos));
+}
+
+static std::string resolve_openclaw_version_from_path(const std::string& config_path) {
+  std::string v = trim_copy(get_env("OPENCLAW_VERSION"));
+  if (!v.empty()) return v;
+  v = exec_first_line("openclaw --version 2>/dev/null");
+  if (!v.empty()) return v;
+  if (!config_path.empty()) {
+    std::string body;
+    if (read_file_to_string(config_path, body)) {
+      v = parse_last_touched_version_from_openclaw_json(body);
+      if (!v.empty()) return v;
+    }
+  }
+  return "unknown";
+}
+
+static std::string resolve_beagle_channel_version_from_path() {
+  std::string v = trim_copy(get_env("BEAGLE_CHANNEL_VERSION"));
+  if (!v.empty()) return v;
+  std::string home = get_env("HOME");
+  if (home.empty()) return "unknown";
+  std::string path = home + "/.openclaw/extensions/beagle/package.json";
+  std::string body;
+  if (!read_file_to_string(path, body)) return "unknown";
+  if (extract_json_string(body, "version", v) && !trim_copy(v).empty()) return trim_copy(v);
+  return "unknown";
+}
+
+static std::string fetch_external_ip_curl() {
+  std::string pre = trim_copy(get_env("BEAGLE_EXTERNAL_IP"));
+  if (!pre.empty()) return pre;
+  FILE* p = popen("curl -fsS --max-time 6 https://api.ipify.org 2>/dev/null", "r");
+  if (!p) return "";
+  char buf[64];
+  std::string out;
+  if (fgets(buf, sizeof(buf), p)) out = trim_copy(std::string(buf));
+  pclose(p);
+  return out;
+}
+
+static std::string get_external_ip_cached() {
+  static std::string cache;
+  static std::chrono::steady_clock::time_point last{};
+  static bool has_last = false;
+  auto now = std::chrono::steady_clock::now();
+  if (has_last && !cache.empty() &&
+      now - last < std::chrono::seconds(3600)) {
+    return cache;
+  }
+  cache = fetch_external_ip_curl();
+  last = now;
+  has_last = true;
+  return cache;
+}
+
 static std::string events_to_json(std::vector<Event> events) {
   std::ostringstream oss;
   oss << "[";
@@ -706,18 +837,6 @@ static std::string resolve_directory_hello(const ServerOptions& opts) {
   return env_hello;
 }
 
-static std::string resolve_openclaw_version() {
-  std::string v = trim_copy(get_env("OPENCLAW_VERSION"));
-  if (!v.empty()) return v;
-  return "unknown";
-}
-
-static std::string resolve_beagle_channel_version() {
-  std::string v = trim_copy(get_env("BEAGLE_CHANNEL_VERSION"));
-  if (!v.empty()) return v;
-  return "unknown";
-}
-
 static std::string account_data_dir(const std::string& base_data_dir,
                                     const std::string& account_id,
                                     bool multi_account) {
@@ -761,6 +880,7 @@ static std::string build_directory_profile_payload(const AccountRuntime* runtime
   if (!runtime || !runtime->sdk) return "";
   std::string host_name = get_hostname();
   std::string host_ip = get_local_ip_address();
+  std::string host_ip_ext = get_external_ip_cached();
   return std::string("{\"profile\":{\"address\":\"")
       + json_escape(runtime->sdk->address())
       + "\",\"agentName\":\"" + json_escape(runtime->agent_name)
@@ -768,6 +888,7 @@ static std::string build_directory_profile_payload(const AccountRuntime* runtime
       + "\",\"beagleChannelVersion\":\"" + json_escape(beagle_channel_version)
       + "\",\"hostName\":\"" + json_escape(host_name)
       + "\",\"hostIp\":\"" + json_escape(host_ip)
+      + "\",\"hostIpExternal\":\"" + json_escape(host_ip_ext)
       + "\"}}";
 }
 
@@ -782,20 +903,30 @@ int main(int argc, char** argv) {
   std::string openclaw_config_path = resolve_openclaw_config_path(opts);
   std::string directory_address = resolve_directory_address(opts);
   std::string directory_hello = resolve_directory_hello(opts);
-  std::string openclaw_version = resolve_openclaw_version();
-  std::string beagle_channel_version = resolve_beagle_channel_version();
+  std::string openclaw_version = resolve_openclaw_version_from_path(openclaw_config_path);
+  std::string beagle_channel_version = resolve_beagle_channel_version_from_path();
   std::vector<AgentProfile> agent_profiles;
   if (!openclaw_config_path.empty() && file_exists(openclaw_config_path)) {
     agent_profiles = load_agent_profiles_from_openclaw_config(openclaw_config_path);
     log_line(std::string("[sidecar] openclaw config=") + openclaw_config_path
              + " discovered_agents=" + std::to_string(agent_profiles.size()));
   }
+  std::string home = get_env("HOME");
+  if (!home.empty()) {
+    size_t n_before = agent_profiles.size();
+    merge_profiles_from_agents_dir(agent_profiles, home);
+    if (agent_profiles.size() > n_before) {
+      log_line(std::string("[sidecar] merged agent dirs from ~/.openclaw/agents/ total=") +
+               std::to_string(agent_profiles.size()));
+    }
+  }
 
   if (agent_profiles.empty()) {
     AgentProfile fallback;
     fallback.account_id = "default";
     fallback.agent_id = "default";
-    fallback.name = "Snoopy";
+    std::string dn = trim_copy(get_env("BEAGLE_DEFAULT_AGENT_NAME"));
+    fallback.name = dn.empty() ? std::string("OpenClaw") : dn;
     fallback.description = "OpenClaw Beagle agent";
     fallback.region = "California";
     agent_profiles.push_back(std::move(fallback));

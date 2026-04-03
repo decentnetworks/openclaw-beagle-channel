@@ -1341,7 +1341,7 @@ static std::string default_profile_json() {
   return std::string("{\n")
       + "  \"welcomeMessage\": \"Hi! I'm the Beagle OpenClaw bot. Send a message to start.\",\n"
       + "  \"profile\": {\n"
-      + "    \"name\": \"Snoopy\",\n"
+      + "    \"name\": \"OpenClaw\",\n"
       + "    \"gender\": \"2218\",\n"
       + "    \"phone\": \"Claw Bot to Help\",\n"
       + "    \"email\": \"SOL:,ETH:\",\n"
