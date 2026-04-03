@@ -923,10 +923,11 @@ int main(int argc, char** argv) {
 
   if (agent_profiles.empty()) {
     AgentProfile fallback;
-    fallback.account_id = "default";
-    fallback.agent_id = "default";
+    // OpenClaw's default agent slug is "main" (see `openclaw agents list`), not "default".
+    fallback.account_id = "main";
+    fallback.agent_id = "main";
     std::string dn = trim_copy(get_env("BEAGLE_DEFAULT_AGENT_NAME"));
-    fallback.name = dn.empty() ? std::string("OpenClaw") : dn;
+    fallback.name = dn.empty() ? std::string("main") : dn;
     fallback.description = "OpenClaw Beagle agent";
     fallback.region = "California";
     agent_profiles.push_back(std::move(fallback));

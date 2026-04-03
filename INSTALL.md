@@ -277,7 +277,7 @@ The sidecar discovers OpenClaw agents from:
 
 1. `agents` / `agents.list` in `~/.openclaw/openclaw.json` (same keys OpenClaw uses for multi-agent config).
 2. **Subdirectories of `~/.openclaw/agents/<id>/`** — so a single install with only `agents.defaults` in JSON still gets a runtime for `main` (or whatever folders exist), and **`agentName` in the directory profile** comes from that id or from `agent/openclaw.json` inside the folder when present.
-3. If nothing is found, it falls back to one synthetic `default` account (set **`BEAGLE_DEFAULT_AGENT_NAME`** to override the display name; default label is `OpenClaw`, not a demo name).
+3. If nothing is found, it falls back to one synthetic **`main`** account (OpenClaw’s default agent id from `openclaw agents list`). Set **`BEAGLE_DEFAULT_AGENT_NAME`** to override the **display** name; otherwise it stays **`main`**.
 
 **Versions:** `openclawVersion` is resolved from **`OPENCLAW_VERSION`**, else **`openclaw --version`**, else **`meta.lastTouchedVersion`** in `openclaw.json`. **`beagleChannelVersion`** is read from **`~/.openclaw/extensions/beagle/package.json`**, or **`BEAGLE_CHANNEL_VERSION`**.
 
