@@ -607,16 +607,30 @@ static std::string resolve_beagle_channel_version_from_path() {
   return "unknown";
 }
 
-static std::string fetch_external_ip_curl() {
-  std::string pre = trim_copy(get_env("BEAGLE_EXTERNAL_IP"));
-  if (!pre.empty()) return pre;
-  FILE* p = popen("curl -fsS --max-time 6 https://api.ipify.org 2>/dev/null", "r");
+/** One HTTPS GET; returns trimmed first line (IPv4/IPv6 text). Empty on failure. */
+static std::string curl_fetch_text_line(const std::string& url) {
+  FILE* p = popen(("curl -fsS --max-time 8 " + url + " 2>/dev/null").c_str(), "r");
   if (!p) return "";
-  char buf[64];
+  char buf[128];
   std::string out;
   if (fgets(buf, sizeof(buf), p)) out = trim_copy(std::string(buf));
   pclose(p);
   return out;
+}
+
+static std::string fetch_external_ip() {
+  std::string pre = trim_copy(get_env("BEAGLE_EXTERNAL_IP"));
+  if (!pre.empty()) return pre;
+  static const char* urls[] = {
+      "https://api.ipify.org",
+      "https://icanhazip.com",
+      "https://ifconfig.me/ip",
+  };
+  for (const char* url : urls) {
+    std::string out = curl_fetch_text_line(url);
+    if (!out.empty()) return out;
+  }
+  return "";
 }
 
 static std::string get_external_ip_cached() {
@@ -624,13 +638,16 @@ static std::string get_external_ip_cached() {
   static std::chrono::steady_clock::time_point last{};
   static bool has_last = false;
   auto now = std::chrono::steady_clock::now();
-  if (has_last && !cache.empty() &&
-      now - last < std::chrono::seconds(3600)) {
+  if (has_last && now - last < std::chrono::seconds(3600)) {
     return cache;
   }
-  cache = fetch_external_ip_curl();
+  cache = fetch_external_ip();
   last = now;
   has_last = true;
+  if (cache.empty()) {
+    log_line("[sidecar] hostIpExternal empty: set BEAGLE_EXTERNAL_IP or allow outbound HTTPS "
+             "(tried api.ipify.org, icanhazip.com, ifconfig.me/ip).");
+  }
   return cache;
 }
 

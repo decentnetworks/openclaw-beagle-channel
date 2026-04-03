@@ -281,7 +281,7 @@ The sidecar discovers OpenClaw agents from:
 
 **Versions:** `openclawVersion` is resolved from **`OPENCLAW_VERSION`**, else **`openclaw --version`**, else **`meta.lastTouchedVersion`** in `openclaw.json`. **`beagleChannelVersion`** is read from **`~/.openclaw/extensions/beagle/package.json`**, or **`BEAGLE_CHANNEL_VERSION`**.
 
-**IPs:** `hostIp` is the primary local IPv4. **`hostIpExternal`** is the public address (HTTPS fetch via `curl` + api.ipify.org, cached ~1 hour). Set **`BEAGLE_EXTERNAL_IP`** to pin it if outbound HTTP is blocked.
+**IPs:** `hostIp` is the primary local IPv4 from the sidecar. **`hostIpExternal`** (WAN) is **only filled by the beagle-sidecar** when it builds the directory profile JSON — the **beagle-channel** Node plugin does not send host IPs. The sidecar resolves WAN via **`BEAGLE_EXTERNAL_IP`** if set; otherwise it tries **`curl`** to (in order) api.ipify.org, icanhazip.com, and ifconfig.me/ip, with results **cached ~1 hour** (including empty failures, so a transient block does not spam requests). If all lookups fail or outbound HTTPS is blocked, set **`BEAGLE_EXTERNAL_IP=<your public IP>`** in the environment that launches the sidecar.
 
 ### Run with Helper Script
 

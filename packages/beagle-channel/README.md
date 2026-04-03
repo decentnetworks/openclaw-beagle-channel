@@ -2,6 +2,8 @@
 
 This package provides a Beagle Chat channel plugin for OpenClaw. It connects to a local Beagle sidecar daemon over HTTP.
 
+**Directory / WAN IP:** OpenClaw Directory entries include `hostIp` and `hostIpExternal` only when the **beagle-sidecar** sends its JSON profile to the directory peer — this plugin does not supply those fields. If `hostIpExternal` is empty in the directory UI, fix it on the machine running the sidecar: set `BEAGLE_EXTERNAL_IP`, or allow outbound HTTPS so the sidecar can resolve the public IP (see repo `INSTALL.md`).
+
 ## Config
 
 Use the shape OpenClaw `doctor` expects (2026.x): each account under `channels.beagle.accounts`, `allowFrom` when `dmPolicy` is `open`, and `plugins.allow` so the locally installed extension is explicitly trusted.

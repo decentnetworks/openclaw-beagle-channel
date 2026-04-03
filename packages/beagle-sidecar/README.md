@@ -91,7 +91,7 @@ If you omit `--directory-address` (and the env fallbacks are empty), the sidecar
 If you provide `--directory-address`, only that single address is used instead of the defaults.
 The sidecar skips adding itself when its own Carrier address matches a directory address.
 
-After the directory is added as a friend, the sidecar waits until that friend is **online**, then sends a one-time JSON profile message containing the Carrier address, agent name, OpenClaw version, host name, and host IP.
+After the directory is added as a friend, the sidecar waits until that friend is **online**, then sends a one-time JSON profile message containing the Carrier address, agent name, OpenClaw version, host name, **LAN host IP**, and **WAN host IP** (`hostIpExternal`). The **beagle-channel** OpenClaw plugin does not participate in that payload — only this sidecar does. WAN is resolved with `BEAGLE_EXTERNAL_IP`, or by `curl` to public IP services (see INSTALL.md); if it stays empty, set `BEAGLE_EXTERNAL_IP` for the sidecar process.
 
 ## Multi-Agent Routing (What Was Asked vs Implemented)
 
