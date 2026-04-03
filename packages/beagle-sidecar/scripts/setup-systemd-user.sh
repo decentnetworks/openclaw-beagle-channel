@@ -84,6 +84,7 @@ write_unit() {
     echo "WorkingDirectory=$REPO_DIR"
     echo "ExecStart=$START_SH run"
     echo "Restart=on-failure"
+    echo "RestartSec=3"
     echo "Environment=BEAGLE_SDK_ROOT=$BEAGLE_SDK_ROOT"
     echo "Environment=BEAGLE_SIDECAR_DATA_DIR=$data_dir"
     if [[ -n "${BEAGLE_SIDECAR_PORT:-}" ]]; then

@@ -396,6 +396,20 @@ systemctl --user status beagle-sidecar.service   # if you use systemd
 
 Stop the other instance, or run this one with a different **`--port`** (and point OpenClaw `sidecarBaseUrl` at it). Do not run two sidecars on the same port.
 
+**systemd user service stuck in `failed` / “Start request repeated too quickly”**
+
+That happens when **`beagle-sidecar.service`** restarts in a loop (each run hits `Bind failed` until the start limit). The port is still owned by **another** process — often a **foreground** `./start.sh run` you left running in another SSH session, `screen`, or `tmux`, while systemd tries to bind the same port.
+
+```bash
+systemctl --user stop beagle-sidecar
+systemctl --user reset-failed beagle-sidecar
+ss -tlnp | grep 39091    # or: ss -tlnp | grep "$BEAGLE_SIDECAR_PORT"
+# Stop or kill the process that listens (not systemd’s), then:
+systemctl --user start beagle-sidecar
+```
+
+Use **either** the systemd unit **or** a manual foreground run — not both on the same port.
+
 ### OpenClaw CLI: `pairing required` / gateway not reachable
 
 After `openclaw gateway restart`, commands such as `openclaw logs --follow` connect to `ws://127.0.0.1:<port>`. If you see **`GatewayClientRequestError: pairing required`**, the CLI session is not approved yet (this is an OpenClaw gateway/CLI concern, not Beagle-specific).
