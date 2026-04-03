@@ -385,6 +385,17 @@ The sidecar builds one runtime per **OpenClaw agent** from `~/.openclaw/openclaw
 
 After changing config, restart the gateway and sidecar.
 
+### Sidecar: `Bind failed` right after accounts start
+
+The HTTP API binds **once** after all Carrier accounts are up. **`Bind failed`** means the listen port (default **39091**) is already taken — usually another **beagle-sidecar** still running (e.g. systemd user unit) or a stale process.
+
+```bash
+ss -tlnp | grep 39091
+systemctl --user status beagle-sidecar.service   # if you use systemd
+```
+
+Stop the other instance, or run this one with a different **`--port`** (and point OpenClaw `sidecarBaseUrl` at it). Do not run two sidecars on the same port.
+
 ### OpenClaw CLI: `pairing required` / gateway not reachable
 
 After `openclaw gateway restart`, commands such as `openclaw logs --follow` connect to `ws://127.0.0.1:<port>`. If you see **`GatewayClientRequestError: pairing required`**, the CLI session is not approved yet (this is an OpenClaw gateway/CLI concern, not Beagle-specific).

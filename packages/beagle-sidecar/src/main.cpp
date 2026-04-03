@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -961,12 +962,16 @@ int main(int argc, char** argv) {
   addr.sin_port = htons(static_cast<uint16_t>(opts.port));
 
   if (bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-    log_line("Bind failed");
+    log_line(std::string("Bind failed on 0.0.0.0:") + std::to_string(opts.port) + " — "
+             + std::strerror(errno)
+             + " (another process may already use this port; stop the other beagle-sidecar or pick --port)");
+    close(server_fd);
     return 1;
   }
 
   if (listen(server_fd, 16) < 0) {
-    log_line("Listen failed");
+    log_line(std::string("Listen failed on port ") + std::to_string(opts.port) + ": " + std::strerror(errno));
+    close(server_fd);
     return 1;
   }
 
