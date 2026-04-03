@@ -2017,6 +2017,47 @@ static FriendState from_friend_info(const std::string& friendid, const CarrierFr
   return fs;
 }
 
+static std::string carrier_str(const char* p) {
+  return p ? std::string(p) : std::string();
+}
+
+static std::string json_esc_carrier(const std::string& s) {
+  std::string r;
+  r.reserve(s.size() + 8);
+  for (unsigned char c : s) {
+    if (c == '"' || c == '\\') r.push_back('\\');
+    if (c == '\r' || c == '\n') continue;
+    r.push_back(static_cast<char>(c));
+  }
+  return r;
+}
+
+static void emit_friend_info_event(RuntimeState* state, const char* friendid, const CarrierFriendInfo* info) {
+  if (!state || !state->emit_presence || !state->on_incoming || !friendid || !info) return;
+  const CarrierUserInfo& ui = info->user_info;
+  std::ostringstream j;
+  j << "{\"_event\":\"friend_info\",\"peer\":\"" << json_esc_carrier(carrier_str(friendid)) << "\""
+    << ",\"userInfo\":{"
+    << "\"name\":\"" << json_esc_carrier(carrier_str(ui.name)) << "\""
+    << ",\"description\":\"" << json_esc_carrier(carrier_str(ui.description)) << "\""
+    << ",\"hasAvatar\":" << ui.has_avatar
+    << ",\"gender\":\"" << json_esc_carrier(carrier_str(ui.gender)) << "\""
+    << ",\"phone\":\"" << json_esc_carrier(carrier_str(ui.phone)) << "\""
+    << ",\"email\":\"" << json_esc_carrier(carrier_str(ui.email)) << "\""
+    << ",\"region\":\"" << json_esc_carrier(carrier_str(ui.region)) << "\""
+    << "}"
+    << ",\"friendInfo\":{"
+    << "\"label\":\"" << json_esc_carrier(carrier_str(info->label)) << "\""
+    << ",\"connectionStatus\":" << static_cast<int>(info->status)
+    << ",\"presenceStatus\":" << static_cast<int>(info->presence)
+    << "}}";
+  BeagleIncomingMessage ev;
+  ev.peer = friendid;
+  ev.text = j.str();
+  ev.ts = static_cast<long long>(std::time(nullptr));
+  state->on_incoming(ev);
+}
+
 static void store_friend_info(RuntimeState* state,
                               const std::string& friendid,
                               const CarrierFriendInfo* info) {
@@ -3128,6 +3169,7 @@ void friend_info_callback(Carrier* carrier,
   if (!state || !friendid || !info) return;
   log_line(std::string("[beagle-sdk] friend info update for ") + friendid);
   store_friend_info(state, friendid, info);
+  emit_friend_info_event(state, friendid, info);
 }
 
 void friend_added_callback(Carrier* carrier,
@@ -3138,6 +3180,7 @@ void friend_added_callback(Carrier* carrier,
   if (!state || !info) return;
   log_line(std::string("[beagle-sdk] friend added ") + info->user_info.userid);
   store_friend_info(state, info->user_info.userid, info);
+  emit_friend_info_event(state, info->user_info.userid, info);
 }
 
 void friend_presence_callback(Carrier* carrier,
@@ -3157,6 +3200,7 @@ bool friend_list_callback(const CarrierFriendInfo* info, void* context) {
   if (!fid || !*fid) return true;
   log_line(std::string("[beagle-sdk] friend list item ") + fid);
   store_friend_info(state, fid, info);
+  emit_friend_info_event(state, fid, info);
   return true;
 }
 
