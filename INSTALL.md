@@ -372,6 +372,24 @@ ls $BEAGLE_SDK_ROOT/config/carrier.conf
    openclaw gateway config validate
    ```
 
+### OpenClaw CLI: `pairing required` / gateway not reachable
+
+After `openclaw gateway restart`, commands such as `openclaw logs --follow` connect to `ws://127.0.0.1:<port>`. If you see **`GatewayClientRequestError: pairing required`**, the CLI session is not approved yet (this is an OpenClaw gateway/CLI concern, not Beagle-specific).
+
+1. **Confirm the gateway is running**
+   ```bash
+   systemctl --user status openclaw-gateway.service
+   journalctl --user -u openclaw-gateway.service -n 80 --no-pager
+   ```
+2. **Approve this machine’s CLI as a gateway device** (typical fix on headless servers). List pending requests, then approve by id (exact flags depend on your OpenClaw version — use `openclaw devices --help`):
+   ```bash
+   openclaw devices list
+   openclaw devices approve <RequestId>
+   ```
+   If `devices list` fails with the same error, use the Control UI from a browser (see `gateway.controlUi` in `openclaw.json`) to approve pending devices, or check OpenClaw’s docs for the pairing flow for your version.
+3. **Token auth**: If `gateway.auth.mode` is `token`, ensure the CLI uses the same token (e.g. `OPENCLAW_GATEWAY_TOKEN` in `~/.openclaw/.env`, or `openclaw env list` / `openclaw env set`). The user systemd unit must load that environment if the gateway reads token from env.
+4. **Updates**: Newer OpenClaw releases fix edge cases where the CLI incorrectly hits pairing despite token auth; upgrading may help if approval still fails.
+
 ---
 
 ## Project Structure Summary
