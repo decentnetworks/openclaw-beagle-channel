@@ -75,6 +75,9 @@ static void log_line(const std::string& msg) {
 
 static std::mutex g_events_mu;
 static std::vector<Event> g_events;
+/** Parallel copy of inbound events for GET /directory-events so the OpenClaw directory web
+ *  poller does not lose profile JSON when beagle-channel consumes GET /events first. */
+static std::vector<Event> g_directory_events;
 
 static bool decode_json_string(const std::string& body, size_t start, std::string& out, size_t& end_pos) {
   if (start >= body.size() || body[start] != '"') return false;
@@ -765,7 +768,8 @@ static void push_event(const std::string& account_id, const BeagleIncomingMessag
   ev.ts = msg.ts;
 
   std::lock_guard<std::mutex> lock(g_events_mu);
-  g_events.push_back(std::move(ev));
+  g_events.push_back(ev);
+  g_directory_events.push_back(std::move(ev));
   log_line(std::string("[sidecar] queued event account=") + account_id
            + " peer=" + msg.peer
            + " text_len=" + std::to_string(msg.text.size())
@@ -1265,6 +1269,39 @@ int main(int argc, char** argv) {
         std::string ua = header_value(headers, "User-Agent");
         std::ostringstream msg;
         msg << "[sidecar] /events account=" << (selected_account.empty() ? "(all)" : selected_account)
+            << " -> " << events.size() << " event(s)"
+            << " from " << client_ip(client_fd);
+        if (!ua.empty()) msg << " ua=" << ua;
+        log_line(msg.str());
+      }
+      send_response(client_fd, 200, "application/json", events_to_json(std::move(events)));
+    } else if (method == "GET" && path == "/directory-events") {
+      // Same shape as /events but drains g_directory_events (mirrored at enqueue). Use this for
+      // the OpenClaw directory SQLite poller so it never races beagle-channel on /events.
+      if (!wanted_account_id.empty() && !account) {
+        send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"unknown_account\"}");
+        close(client_fd);
+        continue;
+      }
+      std::vector<Event> events;
+      std::vector<Event> remaining;
+      const std::string selected_account = account ? account->account_id : "";
+      {
+        std::lock_guard<std::mutex> lock(g_events_mu);
+        remaining.reserve(g_directory_events.size());
+        for (auto& ev : g_directory_events) {
+          if (selected_account.empty() || ev.account_id == selected_account) {
+            events.push_back(std::move(ev));
+          } else {
+            remaining.push_back(std::move(ev));
+          }
+        }
+        g_directory_events.swap(remaining);
+      }
+      if (!events.empty()) {
+        std::string ua = header_value(headers, "User-Agent");
+        std::ostringstream msg;
+        msg << "[sidecar] /directory-events account=" << (selected_account.empty() ? "(all)" : selected_account)
             << " -> " << events.size() << " event(s)"
             << " from " << client_ip(client_fd);
         if (!ua.empty()) msg << " ua=" << ua;
