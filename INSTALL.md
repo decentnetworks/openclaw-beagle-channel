@@ -372,6 +372,19 @@ ls $BEAGLE_SDK_ROOT/config/carrier.conf
    openclaw gateway config validate
    ```
 
+### Beagle: sidecar returns `unknown_account` on `/events`
+
+Gateway logs show `sidecar /events failed: 404 {"ok":false,"error":"unknown_account"}` when **`X-Beagle-Account`** (from `channels.beagle.accounts.<id>`) does not match any Carrier runtime the sidecar started.
+
+The sidecar builds one runtime per **OpenClaw agent** from `~/.openclaw/openclaw.json` (`agents` / `agents.list`), using each agent’s id as the account name (e.g. `main`, `dirs`). If `openclaw doctor` moved Beagle settings under **`accounts.default`** but your agents are named **`main`** / **`dirs`**, the plugin may send `default` while the sidecar only has `main` — hence `unknown_account`.
+
+**Fix (pick one):**
+
+- **Upgrade sidecar** (recommended): recent builds map **`default`** to the same runtime as the sidecar’s default agent (`main` when present), so doctor-style `accounts.default` works without renaming.
+- **Align config**: Rename `channels.beagle.accounts.default` to **`channels.beagle.accounts.main`** (or whatever agent id you use), matching routing in OpenClaw.
+
+After changing config, restart the gateway and sidecar.
+
 ### OpenClaw CLI: `pairing required` / gateway not reachable
 
 After `openclaw gateway restart`, commands such as `openclaw logs --follow` connect to `ws://127.0.0.1:<port>`. If you see **`GatewayClientRequestError: pairing required`**, the CLI session is not approved yet (this is an OpenClaw gateway/CLI concern, not Beagle-specific).

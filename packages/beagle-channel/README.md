@@ -122,6 +122,7 @@ npm run build
   - **`allowFrom`**: With `dmPolicy: "open"`, set `allowFrom: ["*"]` on each `channels.beagle.accounts.<id>` (or run `openclaw doctor --fix`).
   - **`plugins.allow`**: If the plugin lives under `~/.openclaw/extensions/beagle/`, add `"plugins": { "allow": ["beagle"], ... }` so OpenClaw treats it as an explicitly allowed id.
   - **Config shape**: Older single-account keys at `channels.beagle.*` are migrated by doctor into `channels.beagle.accounts.default.*`; prefer the nested form in new configs.
+- **`unknown_account` from sidecar (`/events` 404)** — The plugin sends `X-Beagle-Account: <channels.beagle.accounts key>` (often `default` after doctor). The sidecar starts one Carrier stack per **agent id** in `openclaw.json` (`main`, `dirs`, …). If those names differ, you get `unknown_account`. **Fix:** use a current **beagle-sidecar** build (maps `default` → default agent runtime), or rename the Beagle account key to match your agent id (e.g. `main` instead of `default`). See **INSTALL.md** troubleshooting.
 - If gateway logs show `dispatch queuedFinal=false` and no `deliver`/`sendText`, the agent route produced no final output for that inbound turn.
 - The channel now sends a fallback text when no outbound message was delivered, so group/DM users do not see silent drops.
 - Useful logs:

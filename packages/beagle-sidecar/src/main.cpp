@@ -976,6 +976,13 @@ int main(int argc, char** argv) {
     if (!wanted.empty()) {
       auto it = accounts.find(wanted);
       if (it != accounts.end()) return it->second.get();
+      // OpenClaw doctor often nests Beagle settings under channels.beagle.accounts.default while
+      // Carrier runtimes are keyed from agents.* (e.g. main, dirs). Map "default" to the same
+      // runtime we use when no X-Beagle-Account header is sent.
+      if (wanted == "default" && !default_account_id.empty()) {
+        auto fb = accounts.find(default_account_id);
+        if (fb != accounts.end()) return fb->second.get();
+      }
       return nullptr;
     }
     auto it = accounts.find(default_account_id);
