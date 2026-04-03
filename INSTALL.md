@@ -227,18 +227,22 @@ Edit `~/.openclaw/openclaw.json`:
         "default": {
           "enabled": true,
           "sidecarBaseUrl": "http://127.0.0.1:39091",
-          "authToken": "devtoken"
+          "authToken": "devtoken",
+          "allowFrom": ["*"]
         }
       }
     }
   },
   "plugins": {
+    "allow": ["beagle"],
     "entries": {
       "beagle": { "enabled": true }
     }
   }
 }
 ```
+
+OpenClaw 2026.x `doctor` may suggest **`allowFrom`** for open DMs and **`plugins.allow`** so locally installed extensions (under `~/.openclaw/extensions/beagle/`) are explicitly trusted. Run `openclaw doctor --fix` if you prefer it to patch `allowFrom` for you.
 
 ---
 

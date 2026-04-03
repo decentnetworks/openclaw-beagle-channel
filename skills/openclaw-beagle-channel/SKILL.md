@@ -70,12 +70,14 @@ Minimal OpenClaw config template:
         "default": {
           "enabled": true,
           "sidecarBaseUrl": "http://127.0.0.1:39091",
-          "authToken": "devtoken"
+          "authToken": "devtoken",
+          "allowFrom": ["*"]
         }
       }
     }
   },
   "plugins": {
+    "allow": ["beagle"],
     "entries": {
       "beagle": { "enabled": true }
     }

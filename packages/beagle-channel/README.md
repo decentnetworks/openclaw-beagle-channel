@@ -4,6 +4,8 @@ This package provides a Beagle Chat channel plugin for OpenClaw. It connects to 
 
 ## Config
 
+Use the shape OpenClaw `doctor` expects (2026.x): each account under `channels.beagle.accounts`, `allowFrom` when `dmPolicy` is `open`, and `plugins.allow` so the locally installed extension is explicitly trusted.
+
 ```json
 {
   "channels": {
@@ -14,11 +16,18 @@ This package provides a Beagle Chat channel plugin for OpenClaw. It connects to 
           "enabled": true,
           "sidecarBaseUrl": "http://127.0.0.1:39091",
           "authToken": "devtoken",
+          "allowFrom": ["*"],
           "trustedGroupPeers": ["aHzsSg...6377"],
           "trustedGroupAddresses": ["E9kgtc...REP6"],
           "requireTrustedGroup": false
         }
       }
+    }
+  },
+  "plugins": {
+    "allow": ["beagle"],
+    "entries": {
+      "beagle": { "enabled": true }
     }
   }
 }
@@ -40,12 +49,14 @@ Example (`main` + `beagle-profile`):
         "main": {
           "enabled": true,
           "sidecarBaseUrl": "http://127.0.0.1:39091",
-          "authToken": "devtoken"
+          "authToken": "devtoken",
+          "allowFrom": ["*"]
         },
         "beagle-profile": {
           "enabled": true,
           "sidecarBaseUrl": "http://127.0.0.1:39091",
-          "authToken": "devtoken"
+          "authToken": "devtoken",
+          "allowFrom": ["*"]
         }
       }
     }
@@ -56,11 +67,12 @@ Example (`main` + `beagle-profile`):
 Then keep OpenClaw bindings/routing rules aligned so `accountId=main` routes to agent `main`,
 and `accountId=beagle-profile` routes to agent `beagle-profile`.
 
-Add the plugin entry so OpenClaw loads the extension:
+Add the plugin entry so OpenClaw loads the extension (include `plugins.allow` so `openclaw doctor` does not warn about unlisted local extensions):
 
 ```json
 {
   "plugins": {
+    "allow": ["beagle"],
     "entries": {
       "beagle": { "enabled": true }
     }
@@ -106,6 +118,10 @@ npm run build
 
 ## Troubleshooting
 
+- **`openclaw doctor` and Beagle**
+  - **`allowFrom`**: With `dmPolicy: "open"`, set `allowFrom: ["*"]` on each `channels.beagle.accounts.<id>` (or run `openclaw doctor --fix`).
+  - **`plugins.allow`**: If the plugin lives under `~/.openclaw/extensions/beagle/`, add `"plugins": { "allow": ["beagle"], ... }` so OpenClaw treats it as an explicitly allowed id.
+  - **Config shape**: Older single-account keys at `channels.beagle.*` are migrated by doctor into `channels.beagle.accounts.default.*`; prefer the nested form in new configs.
 - If gateway logs show `dispatch queuedFinal=false` and no `deliver`/`sendText`, the agent route produced no final output for that inbound turn.
 - The channel now sends a fallback text when no outbound message was delivered, so group/DM users do not see silent drops.
 - Useful logs:
@@ -140,6 +156,7 @@ Set `subscribableChannels` under your Beagle account config:
     "beagle": {
       "accounts": {
         "default": {
+          "allowFrom": ["*"],
           "subscribableChannels": [
             { "id": "1476753578482995334", "name": "#beagle", "description": "BIP discussions" },
             { "id": "1475346350596947979", "name": "#verify", "description": "verification flow" }
