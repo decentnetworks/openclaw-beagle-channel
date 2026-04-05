@@ -34,7 +34,7 @@ Environment:
   BEAGLE_SIDECAR_PORT        Optional port override
   BEAGLE_SIDECAR_TOKEN       Optional bearer token
   BEAGLE_DIRECTORY_ADDRESS   Optional directory Carrier address override
-                             (defaults: both bKaapx...CGi2 and C5WWd6...dKUt)
+                             (default: ZJUCSC...1jV2)
   BEAGLE_EMIT_PRESENCE       Set non-empty to emit friend online/offline events
   BEAGLE_SIDECAR_EXTRA_ARGS  Optional extra args (space-separated)
 EOF

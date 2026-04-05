@@ -1015,17 +1015,18 @@ int main(int argc, char** argv) {
 
   // ── Directory auto-bootstrap ─────────────────────────────────────
   //
-  // Two default directory addresses; both are added as friends so
-  // agents can register with whichever directory is online.
+  // Use the OpenClaw directory as the built-in default so new installs
+  // work without extra BEAGLE_DIRECTORY_ADDRESS setup, while keeping the
+  // previous directory as a backup bootstrap target.
+  const std::string DEFAULT_DIR = "ZJUCSC38KFw7DSwpfLp1HCem3dJEA5NG2ZvahbEjAUFZ4WUb1jV2";
   const std::string DEFAULT_DIR_1 = "bKaapxLjDGwuCZ7oohVFMVbcHWFYy7yNVGXkVSVL8AkAxbokCGi2";
-  const std::string DEFAULT_DIR_2 = "C5WWd6BpDvZmqVysfKZWFitK2B7XJJy9dwXVH12KGK62dk2RdKUt";
 
   std::vector<std::string> dir_addresses;
   if (!trim_copy(directory_address).empty()) {
     dir_addresses.push_back(trim_copy(directory_address));
   } else {
+    dir_addresses.push_back(DEFAULT_DIR);
     dir_addresses.push_back(DEFAULT_DIR_1);
-    dir_addresses.push_back(DEFAULT_DIR_2);
   }
 
   for (auto& kv : accounts) {

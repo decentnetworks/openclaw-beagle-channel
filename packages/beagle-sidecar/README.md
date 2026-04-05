@@ -65,7 +65,7 @@ Multi-agent mode (auto-discover OpenClaw agents and allocate one Carrier identit
   --config $BEAGLE_SDK_ROOT/config/carrier.conf \
   --data-dir ~/.carrier \
   --openclaw-config ~/.openclaw/openclaw.json \
-  --directory-address bKaapxLjDGwuCZ7oohVFMVbcHWFYy7yNVGXkVSVL8AkAxbokCGi2
+  --directory-address ZJUCSC38KFw7DSwpfLp1HCem3dJEA5NG2ZvahbEjAUFZ4WUb1jV2
 ```
 
 If `--openclaw-config` is omitted, sidecar checks:
@@ -84,9 +84,9 @@ Optional OpenClaw Directory friend bootstrap:
 - Env fallback: `BEAGLE_DIRECTORY_ADDRESS` / `OPENCLAW_DIRECTORY_ADDRESS`, and
   `BEAGLE_DIRECTORY_HELLO` / `OPENCLAW_DIRECTORY_HELLO`.
 
-If you omit `--directory-address` (and the env fallbacks are empty), the sidecar adds both built-in default directories as friends:
+If you omit `--directory-address` (and the env fallbacks are empty), the sidecar adds these built-in directory addresses as friends:
+- `ZJUCSC38KFw7DSwpfLp1HCem3dJEA5NG2ZvahbEjAUFZ4WUb1jV2`
 - `bKaapxLjDGwuCZ7oohVFMVbcHWFYy7yNVGXkVSVL8AkAxbokCGi2`
-- `C5WWd6BpDvZmqVysfKZWFitK2B7XJJy9dwXVH12KGK62dk2RdKUt`
 
 If you provide `--directory-address`, only that single address is used instead of the defaults.
 The sidecar skips adding itself when its own Carrier address matches a directory address.
@@ -133,7 +133,7 @@ Manual add-friend API (runtime, no restart):
 curl -s -X POST http://127.0.0.1:39091/addFriend \
   -H "Content-Type: application/json" \
   -H "X-Beagle-Account: default" \
-  -d '{"address":"bKaapxLjDGwuCZ7oohVFMVbcHWFYy7yNVGXkVSVL8AkAxbokCGi2","hello":"openclaw-beagle-channel"}'
+  -d '{"address":"ZJUCSC38KFw7DSwpfLp1HCem3dJEA5NG2ZvahbEjAUFZ4WUb1jV2","hello":"openclaw-beagle-channel"}'
 ```
 
 `address` is required (alias: `peer`); `hello` is optional.

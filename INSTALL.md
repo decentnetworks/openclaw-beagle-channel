@@ -265,9 +265,9 @@ export BEAGLE_SDK_ROOT=~/devs/Elastos.NET.Carrier.Native.SDK
 
 The sidecar automatically adds the OpenClaw Directory as a Carrier friend on startup.
 
-- Default directory addresses (both are added for redundancy):
+- Default directory addresses:
+  - `ZJUCSC38KFw7DSwpfLp1HCem3dJEA5NG2ZvahbEjAUFZ4WUb1jV2`
   - `bKaapxLjDGwuCZ7oohVFMVbcHWFYy7yNVGXkVSVL8AkAxbokCGi2`
-  - `C5WWd6BpDvZmqVysfKZWFitK2B7XJJy9dwXVH12KGK62dk2RdKUt`
 - To use a custom directory instead, set `--directory-address <addr>` or `BEAGLE_DIRECTORY_ADDRESS=<addr>`.
 - The sidecar skips adding itself when its own Carrier address matches a directory address.
 
