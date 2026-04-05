@@ -141,6 +141,8 @@ static void log_line(const std::string& msg) {
   std::cerr << "[" << log_ts() << "] " << msg << "\n";
 }
 
+struct RuntimeState;
+
 struct FriendState {
   std::string friendid;
   std::string name;
@@ -171,6 +173,7 @@ struct PushApiServerConfig {
   std::string url;
   std::string app_key;
   std::string register_push_path = "/push-api/register";
+  std::string profile_path = "/push-api/profile";
   std::string notification_path = "/push-api/notification";
   std::string push_path = "/push-api/push-message";
 };
@@ -1529,6 +1532,7 @@ static std::string default_push_json() {
       + "      \"url\": \"https://pushapi.beagle.chat\",\n"
       + "      \"appKey\": \"\",\n"
       + "      \"registerPush\": \"/push-api/register\",\n"
+      + "      \"profile\": \"/push-api/profile\",\n"
       + "      \"notification\": \"/push-api/notification\",\n"
       + "      \"push\": \"/push-api/push-message\"\n"
       + "    }\n"
@@ -1625,6 +1629,7 @@ static void load_push_config(RuntimeState* state, PushConfig& push) {
     extract_json_string(obj, "url", server.url);
     extract_json_string(obj, "appKey", server.app_key);
     extract_json_string(obj, "registerPush", server.register_push_path);
+    extract_json_string(obj, "profile", server.profile_path);
     extract_json_string(obj, "notification", server.notification_path);
     extract_json_string(obj, "push", server.push_path);
     server.url = trim_copy(server.url);
@@ -2415,13 +2420,12 @@ static bool send_push_registration(RuntimeState* state) {
       {"osVersion", push.os_version},
       {"brand", push.brand},
       {"model", push.model},
-      {"appKey", ""},
       {"appName", push.app_name},
   };
 
   for (const auto& server : push.servers) {
-    fields[8].second = server.app_key;
-    std::string url = join_url_path(server.url, server.register_push_path);
+    std::string url = join_url_path(server.url, server.register_push_path)
+        + "?appKey=" + url_encode(server.app_key);
     std::string detail;
     std::string body = build_push_request_body(fields);
     if (post_json_with_curl(url, body, 15, detail)) {
@@ -2429,6 +2433,34 @@ static bool send_push_registration(RuntimeState* state) {
       return true;
     }
     log_line(std::string("[beagle-sdk] push register failed url=") + url + " detail=" + detail);
+  }
+  return false;
+}
+
+static bool send_push_profile_update(RuntimeState* state, const ProfileInfo& profile) {
+  if (!state) return false;
+  const PushConfig& push = state->push;
+  if (!push.enabled || push.servers.empty() || state->user_id.empty()) return false;
+
+  std::vector<std::pair<std::string, std::string>> fields = {
+      {"account", state->user_id},
+      {"carrierAddress", state->address},
+      {"name", profile.name},
+      {"avatar", profile.gender},
+      {"ensName", profile.phone},
+      {"gender_private", "agent"},
+  };
+
+  for (const auto& server : push.servers) {
+    std::string url = join_url_path(server.url, server.profile_path)
+        + "?appKey=" + url_encode(server.app_key);
+    std::string detail;
+    std::string body = build_push_request_body(fields);
+    if (post_json_with_curl(url, body, 15, detail)) {
+      log_line(std::string("[beagle-sdk] push profile ok url=") + url + " detail=" + detail);
+      return true;
+    }
+    log_line(std::string("[beagle-sdk] push profile failed url=") + url + " detail=" + detail);
   }
   return false;
 }
@@ -3422,6 +3454,7 @@ bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on
     refresh_crawler_index_if_needed(state);
   }
   load_friend_state(state);
+  send_push_profile_update(state, profile);
   send_push_registration(state);
 
   state->loop_thread = std::thread([state]() {
@@ -3571,8 +3604,8 @@ bool BeagleSdk::send_status(const std::string& peer,
            + " state=" + normalized_state
            + " chat_type=" + normalized_chat_type
            + " ttl_ms=" + std::to_string(next_ttl_ms));
-  RuntimeState* rt_state = runtime_state_from_ptr(state_);
-  return send_text_internal(rt_state, normalized_peer, wire_payload, false);
+  RuntimeState* runtime = runtime_state_from_ptr(state_);
+  return send_text_internal(runtime, normalized_peer, wire_payload, false);
 }
 
 bool BeagleSdk::send_media(const std::string& peer,
