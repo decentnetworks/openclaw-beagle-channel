@@ -230,6 +230,11 @@ static bool file_exists(const std::string& path) {
   return access(path.c_str(), R_OK) == 0;
 }
 
+static bool dir_exists(const std::string& path) {
+  struct stat st;
+  return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 static std::string expand_home(const std::string& path) {
   if (path.empty() || path[0] != '~') return path;
   const std::string home = get_env("HOME");
@@ -864,7 +869,28 @@ static std::string account_data_dir(const std::string& base_data_dir,
   if (!multi_account) return base_data_dir;
   std::string cleaned = sanitize_account_id(account_id);
   if (cleaned.empty()) cleaned = "default";
-  return base_data_dir + "/accounts/" + cleaned;
+  std::string nested = base_data_dir + "/accounts/" + cleaned;
+
+  if ((cleaned == "main" || cleaned == "default") && dir_exists(base_data_dir) && !dir_exists(nested)) {
+    DIR* dir = opendir(base_data_dir.c_str());
+    if (dir) {
+      bool has_legacy_entries = false;
+      for (dirent* ent = readdir(dir); ent; ent = readdir(dir)) {
+        std::string name = ent->d_name;
+        if (name.empty() || name == "." || name == ".." || name == "accounts") continue;
+        has_legacy_entries = true;
+        break;
+      }
+      closedir(dir);
+      if (has_legacy_entries) {
+        log_line(std::string("[sidecar] legacy Carrier root detected; reusing ")
+                 + base_data_dir + " for account=" + cleaned);
+        return base_data_dir;
+      }
+    }
+  }
+
+  return nested;
 }
 
 static std::string requested_account_id(const std::string& headers, const std::string& body) {

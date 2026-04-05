@@ -34,6 +34,9 @@ cmake --build build
 ./build/beagle-sidecar --port 39091 --token devtoken
 ```
 
+`./start.sh run` now refuses to launch a stub build unless you explicitly set `BEAGLE_ALLOW_STUB=1`,
+because stub mode never creates real Carrier accounts.
+
 ### Build (Real SDK)
 
 This mode builds the sidecar with the full Beagle network SDK.
@@ -76,6 +79,11 @@ If `--openclaw-config` is omitted, sidecar checks:
 
 When agents are discovered, sidecar starts one account per agent and uses agent metadata
 (`name`, `description`, `gender`, `phone`, `email`, `region`) to populate Carrier self userinfo.
+
+Upgrade note: older single-account installs kept Carrier state directly under `~/.carrier`.
+Current multi-agent builds use `~/.carrier/accounts/<accountId>/...`, but on upgrade the sidecar
+reuses the legacy root for `main`/`default` when it detects existing single-account state so your
+original Carrier identity is preserved.
 
 Optional OpenClaw Directory friend bootstrap:
 
@@ -245,6 +253,9 @@ When you pass `--data-dir`, the sidecar will create:
 In multi-agent mode, files are isolated per account under:
 
 - `--data-dir/accounts/<accountId>/...`
+
+Nested account directories are created recursively on startup, so upgrading from an older
+single-account layout no longer depends on `accounts/` already existing.
 
 Edit `beagle_profile.json` at any time to update the user profile and welcome text.
 Default contents:

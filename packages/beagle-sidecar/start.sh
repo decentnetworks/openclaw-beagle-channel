@@ -78,6 +78,30 @@ ensure_sdk_root() {
   fi
 }
 
+ensure_real_build() {
+  local cache="$REPO_DIR/build/CMakeCache.txt"
+  if [[ ! -f "$cache" ]]; then
+    return 0
+  fi
+  if rg -q '^BEAGLE_SDK_STUB:BOOL=ON$' "$cache"; then
+    if [[ "${BEAGLE_ALLOW_STUB:-}" == "1" ]]; then
+      echo "Warning: build/beagle-sidecar is configured with BEAGLE_SDK_STUB=ON; no real Carrier account will be created." >&2
+      return 0
+    fi
+    cat >&2 <<'EOF'
+build/beagle-sidecar is configured with BEAGLE_SDK_STUB=ON.
+This mode never creates real Carrier accounts.
+
+Reconfigure and rebuild with:
+  cmake -S . -B build -DBEAGLE_SDK_STUB=OFF -DBEAGLE_SDK_ROOT=$BEAGLE_SDK_ROOT
+  cmake --build build
+
+If you intentionally want stub mode, rerun with BEAGLE_ALLOW_STUB=1.
+EOF
+    exit 1
+  fi
+}
+
 build_args() {
   local data_dir="${BEAGLE_SIDECAR_DATA_DIR:-$HOME/.carrier}"
   ARGS=(--config "$BEAGLE_SDK_ROOT/config/carrier.conf" --data-dir "$data_dir")
@@ -103,6 +127,7 @@ cmd="${1:-run}"
 case "$cmd" in
   run)
     ensure_sdk_root
+    ensure_real_build
     build_args
     export LD_LIBRARY_PATH="${BEAGLE_SDK_ROOT}/build/linux/src/carrier:${BEAGLE_SDK_ROOT}/build/linux/src/session:${BEAGLE_SDK_ROOT}/build/linux/src/filetransfer:${BEAGLE_SDK_ROOT}/build/linux/intermediates/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     exec "$BIN" "${ARGS[@]}"

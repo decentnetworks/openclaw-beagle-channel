@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cerrno>
 #include <cstdio>
 #include <cctype>
 #include <cstdint>
@@ -39,7 +40,8 @@ BeagleSdk::~BeagleSdk() { stop(); }
 bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on_incoming) {
   (void)on_incoming;
   stop();
-  std::cerr << "[beagle-sdk] start stub. data_dir=" << options.data_dir << "\n";
+  std::cerr << "[beagle-sdk] start stub. data_dir=" << options.data_dir
+            << " (BEAGLE_SDK_STUB=ON; no real Carrier account will be created)\n";
   user_id_ = options.account_id.empty() ? "stub-user" : ("stub-user-" + options.account_id);
   address_ = options.account_id.empty() ? "stub-address" : ("stub-address-" + options.account_id);
   return true;
@@ -311,11 +313,35 @@ static bool file_exists(const std::string& path) {
   return f.good();
 }
 
-static void ensure_dir(const std::string& path) {
-  if (path.empty()) return;
-  struct stat st;
-  if (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) return;
-  mkdir(path.c_str(), 0755);
+static bool ensure_dir(const std::string& path) {
+  if (path.empty()) return true;
+
+  auto is_dir = [](const std::string& candidate) -> bool {
+    struct stat st;
+    return stat(candidate.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+  };
+
+  if (is_dir(path)) return true;
+
+  size_t pos = 0;
+  if (!path.empty() && path[0] == '/') pos = 1;
+  while (true) {
+    pos = path.find('/', pos);
+    std::string part = (pos == std::string::npos) ? path : path.substr(0, pos);
+    if (!part.empty() && !is_dir(part)) {
+      if (mkdir(part.c_str(), 0755) != 0 && errno != EEXIST) {
+        log_line(std::string("[beagle-sdk] mkdir failed path=") + part
+                 + " errno=" + std::to_string(errno));
+        return false;
+      }
+    }
+    if (pos == std::string::npos) break;
+    ++pos;
+  }
+
+  if (is_dir(path)) return true;
+  log_line(std::string("[beagle-sdk] directory missing after mkdir path=") + path);
+  return false;
 }
 
 static std::vector<std::string> split_ws(const std::string& s) {
@@ -482,7 +508,7 @@ static std::vector<std::string> list_entries(const std::string& dirpath, bool wa
   if (!d) return out;
   struct dirent* ent = nullptr;
   while ((ent = readdir(d)) != nullptr) {
-    std::string name = ent->d_name ? ent->d_name : "";
+    std::string name = ent->d_name;
     if (name.empty() || name == "." || name == "..") continue;
     if (want_dirs && ent->d_type != DT_DIR && ent->d_type != DT_UNKNOWN) continue;
     if (!want_dirs && ent->d_type == DT_DIR) continue;
@@ -3369,7 +3395,11 @@ bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on
 
   if (!options.data_dir.empty()) {
     state->persistent_location = options.data_dir;
-    ensure_dir(state->persistent_location);
+    if (!ensure_dir(state->persistent_location)) {
+      log_line(std::string("[beagle-sdk] failed to prepare data dir: ") + state->persistent_location);
+      carrier_config_free(&opts);
+      return false;
+    }
     // carrier_config_free() will free this field, so allocate with strdup.
     opts.persistent_location = strdup(state->persistent_location.c_str());
     state->profile_path = state->persistent_location + "/beagle_profile.json";
@@ -3380,11 +3410,19 @@ bool BeagleSdk::start(const BeagleSdkOptions& options, BeagleIncomingCallback on
     state->friend_event_log_path = state->persistent_location + "/friend_events.log";
     state->incoming_event_log_path = state->persistent_location + "/incoming_events.jsonl";
     state->media_dir = state->persistent_location + "/media";
-    ensure_dir(state->media_dir);
+    if (!ensure_dir(state->media_dir)) {
+      log_line(std::string("[beagle-sdk] failed to prepare media dir: ") + state->media_dir);
+      carrier_config_free(&opts);
+      return false;
+    }
   } else {
     state->media_dir = "./media";
     state->incoming_event_log_path = "./incoming_events.jsonl";
-    ensure_dir(state->media_dir);
+    if (!ensure_dir(state->media_dir)) {
+      log_line(std::string("[beagle-sdk] failed to prepare media dir: ") + state->media_dir);
+      carrier_config_free(&opts);
+      return false;
+    }
   }
 
   CarrierCallbacks callbacks;
