@@ -54,7 +54,7 @@ resolve_sdk_root() {
   local cache="$REPO_DIR/build/CMakeCache.txt"
   if [[ -f "$cache" ]]; then
     local line
-    line="$(rg -N "BEAGLE_SDK_ROOT:UNINITIALIZED=" "$cache" || true)"
+    line="$(grep -m1 '^BEAGLE_SDK_ROOT:UNINITIALIZED=' "$cache" 2>/dev/null || true)"
     if [[ -n "$line" ]]; then
       BEAGLE_SDK_ROOT="${line#*=}"
       export BEAGLE_SDK_ROOT

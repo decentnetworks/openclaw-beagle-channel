@@ -1098,9 +1098,10 @@ int main(int argc, char** argv) {
   //
   // Use the OpenClaw directory as the built-in default so new installs
   // work without extra BEAGLE_DIRECTORY_ADDRESS setup, while keeping the
-  // previous directory as a backup bootstrap target.
+  // previous directories as backup bootstrap targets.
   const std::string DEFAULT_DIR = "ZJUCSC38KFw7DSwpfLp1HCem3dJEA5NG2ZvahbEjAUFZ4WUb1jV2";
   const std::string DEFAULT_DIR_1 = "bKaapxLjDGwuCZ7oohVFMVbcHWFYy7yNVGXkVSVL8AkAxbokCGi2";
+  const std::string DEFAULT_DIR_2 = "C5WWd6BpDvZmqVysfKZWFitK2B7XJJy9dwXVH12KGK62dk2RdKUt";
 
   std::vector<std::string> dir_addresses;
   if (!trim_copy(directory_address).empty()) {
@@ -1108,6 +1109,7 @@ int main(int argc, char** argv) {
   } else {
     dir_addresses.push_back(DEFAULT_DIR);
     dir_addresses.push_back(DEFAULT_DIR_1);
+    dir_addresses.push_back(DEFAULT_DIR_2);
   }
 
   for (auto& kv : accounts) {
@@ -1172,10 +1174,7 @@ int main(int argc, char** argv) {
 
         for (int wait_attempt = 1; wait_attempt <= 120; ++wait_attempt) {
           if (!started || !started->sdk) return;
-          if (!started->sdk->friend_is_online(dir_userid)) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
-            continue;
-          }
+          bool online = started->sdk->friend_is_online(dir_userid);
 
           bool profile_ok = false;
           for (int push_attempt = 1; push_attempt <= 6; ++push_attempt) {
@@ -1185,6 +1184,7 @@ int main(int argc, char** argv) {
                      + " peer=" + dir_userid
                      + " wait_attempt=" + std::to_string(wait_attempt)
                      + " push_attempt=" + std::to_string(push_attempt)
+                     + " online=" + (online ? "true" : "false")
                      + " result=" + (profile_ok ? "ok" : "failed"));
             if (profile_ok) return;
             std::this_thread::sleep_for(std::chrono::seconds(2));
