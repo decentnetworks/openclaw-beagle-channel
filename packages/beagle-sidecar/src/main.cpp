@@ -959,11 +959,11 @@ int main(int argc, char** argv) {
              + " discovered_agents=" + std::to_string(agent_profiles.size()));
   }
   std::string home = get_env("HOME");
-  if (!home.empty()) {
+  if (agent_profiles.empty() && !home.empty()) {
     size_t n_before = agent_profiles.size();
     merge_profiles_from_agents_dir(agent_profiles, home);
     if (agent_profiles.size() > n_before) {
-      log_line(std::string("[sidecar] merged agent dirs from ~/.openclaw/agents/ total=") +
+      log_line(std::string("[sidecar] discovered agent dirs from ~/.openclaw/agents/ total=") +
                std::to_string(agent_profiles.size()));
     }
   }

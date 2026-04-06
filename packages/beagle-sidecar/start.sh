@@ -62,7 +62,7 @@ resolve_sdk_root() {
   local cache="$REPO_DIR/build/CMakeCache.txt"
   if [[ -f "$cache" ]]; then
     local line
-    line="$(rg -N "BEAGLE_SDK_ROOT:UNINITIALIZED=" "$cache" || true)"
+    line="$(grep -m 1 "BEAGLE_SDK_ROOT:UNINITIALIZED=" "$cache" || true)"
     if [[ -n "$line" ]]; then
       BEAGLE_SDK_ROOT="${line#*=}"
       export BEAGLE_SDK_ROOT
@@ -83,7 +83,7 @@ ensure_real_build() {
   if [[ ! -f "$cache" ]]; then
     return 0
   fi
-  if rg -q '^BEAGLE_SDK_STUB:BOOL=ON$' "$cache"; then
+  if grep -q '^BEAGLE_SDK_STUB:BOOL=ON$' "$cache"; then
     if [[ "${BEAGLE_ALLOW_STUB:-}" == "1" ]]; then
       echo "Warning: build/beagle-sidecar is configured with BEAGLE_SDK_STUB=ON; no real Carrier account will be created." >&2
       return 0
