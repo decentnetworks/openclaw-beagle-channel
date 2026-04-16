@@ -99,6 +99,21 @@ type SubscriptionStore = {
   records: SubscriptionRecord[];
 };
 
+type DirectoryPublicProfile = {
+  displayName?: string;
+  headline?: string;
+  avatarUrl?: string;
+  homepageUrl?: string;
+  socials?: Record<string, string>;
+};
+
+type IdentityProfileSnapshot = {
+  agentName: string;
+  publicProfile: DirectoryPublicProfile;
+  fingerprint: string;
+  sourcePath: string;
+};
+
 type DiscordMessageAuthor = {
   id?: string;
   username?: string;
@@ -314,6 +329,194 @@ function resolveLocalMediaPath(inputPath: any) {
     }
   }
   return expandHome;
+}
+
+
+function expandHomePath(rawPath: any) {
+  const raw = String(rawPath ?? "").trim();
+  const home = process.env.HOME || "";
+  if (!raw) return "";
+  if (raw.startsWith("~/") && home) return resolve(home, raw.slice(2));
+  return raw;
+}
+
+function resolveWorkspaceRoot(cfg: any) {
+  const configured = String(
+    cfg?.agents?.defaults?.workspace ?? cfg?.agent?.workspace ?? ""
+  ).trim();
+  if (configured) return resolve(expandHomePath(configured));
+
+  const home = process.env.HOME || "";
+  const profile = String(process.env.OPENCLAW_PROFILE || "").trim();
+  if (!home) return resolve(".openclaw", "workspace");
+  if (profile && profile !== "default") {
+    return resolve(home, `.openclaw/workspace-${profile}`);
+  }
+  return resolve(home, ".openclaw/workspace");
+}
+
+function normalizeIdentityValue(raw: string) {
+  let value = String(raw ?? "").trim();
+  if (!value) return "";
+  if (value.startsWith("`") && value.endsWith("`") && value.length >= 2) {
+    value = value.slice(1, -1).trim();
+  }
+  if (value.startsWith("_") && value.endsWith("_") && value.length >= 2) {
+    value = value.slice(1, -1).trim();
+  }
+  if (value.startsWith("(") && value.endsWith(")") && value.length >= 2) return "";
+  if (value === "-" || value === "—") return "";
+  return value;
+}
+
+function parseIdentityFieldLine(line: string) {
+  const trimmed = String(line ?? "");
+  if (!trimmed.startsWith("- **")) return null;
+  const end = trimmed.indexOf(":**", 4);
+  if (end < 0) return null;
+  const label = trimmed.slice(4, end).trim();
+  const value = normalizeIdentityValue(trimmed.slice(end + 3));
+  if (!label) return null;
+  return { label, value };
+}
+
+function isPublicUrl(value: string) {
+  const lower = String(value ?? "").trim().toLowerCase();
+  return lower.startsWith("https://") || lower.startsWith("http://") || lower.startsWith("data:image/");
+}
+
+function guessImageMime(filePath: string) {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".svg")) return "image/svg+xml";
+  return "";
+}
+
+function resolveIdentityAvatar(value: string, workspaceRoot: string, log?: any) {
+  const clean = String(value ?? "").trim();
+  if (!clean) return "";
+  if (isPublicUrl(clean)) return clean;
+
+  const candidate = isAbsolute(clean) ? clean : resolve(workspaceRoot, clean.replace(/^\.\//, ""));
+  try {
+    if (!existsSync(candidate)) return "";
+    const stat = statSync(candidate);
+    if (!stat.isFile()) return "";
+    if (stat.size > 512 * 1024) {
+      log?.warn?.(`[beagle] skip avatar larger than 512KB path=${candidate}`);
+      return "";
+    }
+    const mime = guessImageMime(candidate);
+    if (!mime) return "";
+    const body = readFileSync(candidate);
+    return `data:${mime};base64,${Buffer.from(body).toString("base64")}`;
+  } catch (err: any) {
+    log?.warn?.(`[beagle] avatar read failed path=${candidate}: ${String(err)}`);
+    return "";
+  }
+}
+
+function loadIdentityProfileSnapshot(cfg: any, log?: any): IdentityProfileSnapshot | null {
+  const workspaceRoot = resolveWorkspaceRoot(cfg);
+  const sourcePath = join(workspaceRoot, "IDENTITY.md");
+  try {
+    if (!existsSync(sourcePath)) return null;
+  } catch {
+    return null;
+  }
+
+  let body = "";
+  try {
+    body = String(readFileSync(sourcePath, "utf8") ?? "");
+  } catch (err: any) {
+    log?.warn?.(`[beagle] failed to read IDENTITY.md: ${String(err)}`);
+    return null;
+  }
+
+  const publicProfile: DirectoryPublicProfile = {};
+  const socials: Record<string, string> = {};
+  let agentName = "";
+
+  for (const line of body.split(/\r?\n/)) {
+    const parsed = parseIdentityFieldLine(line);
+    if (!parsed || !parsed.value) continue;
+    const key = parsed.label.trim().toLowerCase();
+    if (key === "name") {
+      agentName = parsed.value;
+      publicProfile.displayName = parsed.value;
+      continue;
+    }
+    if (key === "vibe") {
+      publicProfile.headline = parsed.value;
+      continue;
+    }
+    if (key === "avatar") {
+      const avatarUrl = resolveIdentityAvatar(parsed.value, workspaceRoot, log);
+      if (avatarUrl) publicProfile.avatarUrl = avatarUrl;
+      continue;
+    }
+    if (["website", "homepage", "site", "url"].includes(key)) {
+      if (isPublicUrl(parsed.value)) publicProfile.homepageUrl = parsed.value;
+      continue;
+    }
+    if (isPublicUrl(parsed.value)) {
+      socials[parsed.label] = parsed.value;
+    }
+  }
+
+  if (Object.keys(socials).length > 0) publicProfile.socials = socials;
+  if (!agentName && publicProfile.displayName) agentName = publicProfile.displayName;
+  if (!agentName && Object.keys(publicProfile).length === 0) return null;
+
+  return {
+    agentName,
+    publicProfile,
+    fingerprint: JSON.stringify({ agentName, publicProfile }),
+    sourcePath
+  };
+}
+
+function createIdentityProfileSync(params: {
+  cfg: any;
+  client: ReturnType<typeof createSidecarClient>;
+  accountId: string;
+  log?: any;
+}) {
+  const intervalMs = Math.max(10000, Number(process.env.BEAGLE_IDENTITY_SYNC_MS || 30000));
+  let lastCheckAt = 0;
+  let lastFingerprint: string | null = null;
+
+  return async function syncIdentityProfile(force = false) {
+    const now = Date.now();
+    if (!force && now - lastCheckAt < intervalMs) return;
+    lastCheckAt = now;
+
+    const snapshot = loadIdentityProfileSnapshot(params.cfg, params.log);
+    const fingerprint = snapshot?.fingerprint || "";
+    if (fingerprint === lastFingerprint) return;
+    lastFingerprint = fingerprint;
+
+    try {
+      const result = await params.client.setPublicProfile({
+        agentName: snapshot?.agentName ?? "",
+        publicProfile: snapshot?.publicProfile ?? {}
+      });
+      if (snapshot) {
+        params.log?.info?.(
+          `[beagle] synced IDENTITY.md account=${params.accountId} pushed=${Number(result?.pushed || 0)} path=${snapshot.sourcePath}`
+        );
+      } else {
+        params.log?.info?.(
+          `[beagle] cleared published identity account=${params.accountId} pushed=${Number(result?.pushed || 0)}`
+        );
+      }
+    } catch (err: any) {
+      params.log?.warn?.(`[beagle] IDENTITY sync failed account=${params.accountId}: ${String(err)}`);
+    }
+  };
 }
 
 function resolveDefaultReplyImagePath() {
@@ -921,6 +1124,7 @@ function abortInboundPollers() {
 
 async function runInboundPollLoop({
   api,
+  cfg,
   accountId,
   account,
   abortSignal,
@@ -928,6 +1132,7 @@ async function runInboundPollLoop({
   log
 }: {
   api: any;
+  cfg: any;
   accountId: string;
   account: BeagleAccount;
   abortSignal: AbortSignal;
@@ -935,6 +1140,8 @@ async function runInboundPollLoop({
   log?: any;
 }) {
   const client = createSidecarClient(account);
+  const syncIdentityProfile = createIdentityProfileSync({ cfg, client, accountId, log });
+  await syncIdentityProfile(true);
   const controller = new AbortController();
   const relayAbort = () => controller.abort();
   abortSignal.addEventListener("abort", relayAbort, { once: true });
@@ -977,6 +1184,7 @@ async function runInboundPollLoop({
       controller.signal.addEventListener("abort", relayRequestAbort, { once: true });
       const pollTimeout = globalThis.setTimeout(() => requestController.abort(), pollTimeoutMs);
       try {
+        await syncIdentityProfile(false);
         const events = await client.pollEvents(requestController.signal);
         consecutivePollFailures = 0;
         lastPollOkAt = Date.now();
@@ -1106,6 +1314,7 @@ export default function register(api: any) {
         log?.info?.(`[${accountId}] beagle inbound poll start (${resolvedAccount.sidecarBaseUrl})`);
         await runInboundPollLoop({
           api,
+          cfg,
           accountId,
           account: resolvedAccount,
           abortSignal,

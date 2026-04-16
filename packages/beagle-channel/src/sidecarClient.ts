@@ -48,10 +48,16 @@ export type SendStatusRequest = {
   seq?: string;
 };
 
+export type SetPublicProfileRequest = {
+  agentName?: string;
+  publicProfile?: Record<string, any>;
+};
+
 export type SidecarClient = {
   sendText(req: SendTextRequest): Promise<void>;
   sendMedia(req: SendMediaRequest): Promise<void>;
   sendStatus(req: SendStatusRequest): Promise<void>;
+  setPublicProfile(req: SetPublicProfileRequest): Promise<any>;
   pollEvents(signal: AbortSignal): Promise<SidecarEvent[]>;
 };
 
@@ -92,6 +98,12 @@ export function createSidecarClient(account: BeagleAccount): SidecarClient {
     },
     async sendStatus(req) {
       await request("/sendStatus", {
+        method: "POST",
+        body: JSON.stringify(req)
+      });
+    },
+    async setPublicProfile(req) {
+      return request("/setPublicProfile", {
         method: "POST",
         body: JSON.stringify(req)
       });
