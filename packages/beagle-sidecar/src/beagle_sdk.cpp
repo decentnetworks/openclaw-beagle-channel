@@ -3259,6 +3259,18 @@ bool friend_list_callback(const CarrierFriendInfo* info, void* context) {
   log_line(std::string("[beagle-sdk] friend list item ") + fid);
   store_friend_info(state, fid, info);
   emit_friend_info_event(state, fid, info);
+  // Emit presence for friends that are currently online at startup.
+  // This ensures the directory gets initial presence even when friends
+  // were already online before the sidecar started.
+  if (state->emit_presence && state->on_incoming) {
+    bool is_online = (info->status == CarrierConnectionStatus_Connected);
+    BeagleIncomingMessage ev;
+    ev.peer = fid;
+    ev.text = std::string("{\"_event\":\"presence\",\"status\":\"")
+              + (is_online ? "online" : "offline") + "\"}";
+    ev.ts = static_cast<long long>(std::time(nullptr));
+    state->on_incoming(ev);
+  }
   return true;
 }
 
@@ -3581,6 +3593,21 @@ bool BeagleSdk::friend_is_online(const std::string& userid) const {
   std::memset(&info, 0, sizeof(info));
   if (carrier_get_friend_info(state->carrier, peer.c_str(), &info) < 0) return false;
   return info.status == CarrierConnectionStatus_Connected;
+}
+
+bool BeagleSdk::has_friend(const std::string& address_or_userid) const {
+  RuntimeState* state = runtime_state_from_ptr(state_);
+  std::string id = trim_copy(address_or_userid);
+  if (!state || !state->carrier || id.empty()) return false;
+  // Try as userid first
+  CarrierFriendInfo info;
+  std::memset(&info, 0, sizeof(info));
+  if (carrier_get_friend_info(state->carrier, id.c_str(), &info) == 0) return true;
+  // Try as address — derive userid first
+  std::string userid = id_from_address(id);
+  if (userid.empty()) return false;
+  std::memset(&info, 0, sizeof(info));
+  return carrier_get_friend_info(state->carrier, userid.c_str(), &info) == 0;
 }
 
 bool BeagleSdk::send_status(const std::string& peer,

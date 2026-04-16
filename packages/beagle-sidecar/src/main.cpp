@@ -51,12 +51,24 @@ struct AgentProfile {
   std::string email;
   std::string description;
   std::string region;
+  std::string public_display_name;
+  std::string public_headline;
+  std::string public_avatar;
+  std::string public_homepage;
+  std::vector<std::pair<std::string, std::string>> public_links;
 };
 
 struct AccountRuntime {
   std::string account_id;
   std::string agent_id;
+  std::string default_agent_name;
   std::string agent_name;
+  std::string public_profile_json;
+  std::string public_display_name;
+  std::string public_headline;
+  std::string public_avatar;
+  std::string public_homepage;
+  std::vector<std::pair<std::string, std::string>> public_links;
   std::unique_ptr<BeagleSdk> sdk;
 };
 
@@ -928,15 +940,51 @@ static std::string build_directory_profile_payload(const AccountRuntime* runtime
   std::string host_name = get_hostname();
   std::string host_ip = get_local_ip_address();
   std::string host_ip_ext = get_external_ip_cached();
-  return std::string("{\"profile\":{\"address\":\"")
+
+  std::string public_profile = trim_copy(runtime->public_profile_json);
+  if (public_profile.empty()) {
+    bool has_public_profile = false;
+    auto append_public_field = [&](const std::string& key, const std::string& value) {
+      if (value.empty()) return;
+      public_profile += has_public_profile ? "," : "";
+      public_profile += "\"" + json_escape(key) + "\":\"" + json_escape(value) + "\"";
+      has_public_profile = true;
+    };
+
+    append_public_field("displayName", runtime->public_display_name);
+    append_public_field("headline", runtime->public_headline);
+    append_public_field("avatarUrl", runtime->public_avatar);
+    append_public_field("homepageUrl", runtime->public_homepage);
+
+    if (!runtime->public_links.empty()) {
+      std::string links_json;
+      bool has_links = false;
+      for (const auto& kv : runtime->public_links) {
+        if (kv.first.empty() || kv.second.empty()) continue;
+        links_json += has_links ? "," : "";
+        links_json += "\"" + json_escape(kv.first) + "\":\"" + json_escape(kv.second) + "\"";
+        has_links = true;
+      }
+      if (has_links) {
+        public_profile += has_public_profile ? "," : "";
+        public_profile += "\"socials\":{" + links_json + "}";
+      }
+    }
+  }
+
+  std::string payload = std::string("{\"profile\":{\"address\":\"")
       + json_escape(runtime->sdk->address())
       + "\",\"agentName\":\"" + json_escape(runtime->agent_name)
       + "\",\"openclawVersion\":\"" + json_escape(openclaw_version)
       + "\",\"beagleChannelVersion\":\"" + json_escape(beagle_channel_version)
       + "\",\"hostName\":\"" + json_escape(host_name)
       + "\",\"hostIp\":\"" + json_escape(host_ip)
-      + "\",\"hostIpExternal\":\"" + json_escape(host_ip_ext)
-      + "\"}}";
+      + "\",\"hostIpExternal\":\"" + json_escape(host_ip_ext) + "\"";
+  if (!public_profile.empty()) {
+    payload += ",\"publicProfile\":" + public_profile;
+  }
+  payload += "}}";
+  return payload;
 }
 
 int main(int argc, char** argv) {
@@ -980,6 +1028,7 @@ int main(int argc, char** argv) {
     agent_profiles.push_back(std::move(fallback));
   }
 
+
   const bool multi_account = agent_profiles.size() > 1;
   std::map<std::string, std::unique_ptr<AccountRuntime>> accounts;
   std::string default_account_id;
@@ -993,7 +1042,13 @@ int main(int argc, char** argv) {
     std::unique_ptr<AccountRuntime> runtime(new AccountRuntime());
     runtime->account_id = account_id;
     runtime->agent_id = profile.agent_id.empty() ? account_id : profile.agent_id;
-    runtime->agent_name = profile.name.empty() ? runtime->agent_id : profile.name;
+    runtime->default_agent_name = profile.name.empty() ? runtime->agent_id : profile.name;
+    runtime->agent_name = runtime->default_agent_name;
+    runtime->public_display_name = profile.public_display_name;
+    runtime->public_headline = profile.public_headline;
+    runtime->public_avatar = profile.public_avatar;
+    runtime->public_homepage = profile.public_homepage;
+    runtime->public_links = profile.public_links;
     runtime->sdk.reset(new BeagleSdk());
 
     BeagleSdkOptions sdk_opts;
@@ -1069,60 +1124,76 @@ int main(int argc, char** argv) {
                    directory_hello,
                    openclaw_version,
                    beagle_channel_version]() {
-        for (int attempt = 1; attempt <= 12; ++attempt) {
+        bool already_friend = started->sdk->has_friend(dir_addr);
+
+        if (!already_friend) {
+          // Wait for SDK to be ready
+          for (int attempt = 1; attempt <= 12; ++attempt) {
+            if (!started || !started->sdk) return;
+            BeagleStatus st = started->sdk->status();
+            if (!st.ready) {
+              std::this_thread::sleep_for(std::chrono::seconds(2));
+              continue;
+            }
+
+            bool added = started->sdk->add_friend(dir_addr, directory_hello);
+            log_line(std::string("[sidecar] directory friend add account=") + account_id
+                     + " address=" + dir_addr
+                     + " attempt=" + std::to_string(attempt)
+                     + " result=" + (added ? "ok" : "failed"));
+
+            if (added) {
+              already_friend = true;
+              break;
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+          }
+        } else {
+          log_line(std::string("[sidecar] directory friend already exists, skipping add account=")
+                   + account_id + " address=" + dir_addr);
+        }
+
+        if (!already_friend) {
+          log_line(std::string("[sidecar] directory friend add failed after retries account=")
+                   + account_id + " address=" + dir_addr);
+          return;
+        }
+
+        // Directory is a friend — wait for it to come online and push profile
+        std::string dir_userid = started->sdk->id_from_address(dir_addr);
+        if (dir_userid.empty()) {
+          log_line(std::string("[sidecar] directory friend but cannot derive userid account=")
+                   + account_id + " address=" + dir_addr);
+          return;
+        }
+
+        std::string profile_payload = build_directory_profile_payload(
+            started, openclaw_version, beagle_channel_version);
+
+        for (int wait_attempt = 1; wait_attempt <= 120; ++wait_attempt) {
           if (!started || !started->sdk) return;
-          BeagleStatus st = started->sdk->status();
-          if (!st.ready) {
+          if (!started->sdk->friend_is_online(dir_userid)) {
             std::this_thread::sleep_for(std::chrono::seconds(2));
             continue;
           }
 
-          bool added = started->sdk->add_friend(dir_addr, directory_hello);
-          log_line(std::string("[sidecar] directory friend add account=") + account_id
-                   + " address=" + dir_addr
-                   + " attempt=" + std::to_string(attempt)
-                   + " result=" + (added ? "ok" : "failed"));
-
-          if (added) {
-            std::string dir_userid = started->sdk->id_from_address(dir_addr);
-            if (dir_userid.empty()) {
-              log_line(std::string("[sidecar] directory friend added but cannot derive userid account=")
-                       + account_id + " address=" + dir_addr);
-              return;
-            }
-
-            std::string profile_payload = build_directory_profile_payload(
-                started, openclaw_version, beagle_channel_version);
-
-            for (int wait_attempt = 1; wait_attempt <= 120; ++wait_attempt) {
-              if (!started || !started->sdk) return;
-              if (!started->sdk->friend_is_online(dir_userid)) {
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-                continue;
-              }
-
-              bool profile_ok = false;
-              for (int push_attempt = 1; push_attempt <= 6; ++push_attempt) {
-                profile_ok = started->sdk->send_text(dir_userid, profile_payload);
-                log_line(std::string("[sidecar] directory auto profile push account=") + account_id
-                         + " address=" + dir_addr
-                         + " peer=" + dir_userid
-                         + " wait_attempt=" + std::to_string(wait_attempt)
-                         + " push_attempt=" + std::to_string(push_attempt)
-                         + " result=" + (profile_ok ? "ok" : "failed"));
-                if (profile_ok) return;
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-              }
-
-              std::this_thread::sleep_for(std::chrono::seconds(2));
-            }
-            log_line(std::string("[sidecar] directory auto profile push timeout account=")
-                     + account_id + " address=" + dir_addr + " peer=" + dir_userid);
+          bool profile_ok = false;
+          for (int push_attempt = 1; push_attempt <= 6; ++push_attempt) {
+            profile_ok = started->sdk->send_text(dir_userid, profile_payload);
+            log_line(std::string("[sidecar] directory auto profile push account=") + account_id
+                     + " address=" + dir_addr
+                     + " peer=" + dir_userid
+                     + " wait_attempt=" + std::to_string(wait_attempt)
+                     + " push_attempt=" + std::to_string(push_attempt)
+                     + " result=" + (profile_ok ? "ok" : "failed"));
+            if (profile_ok) return;
+            std::this_thread::sleep_for(std::chrono::seconds(2));
           }
 
-          if (added) return;
           std::this_thread::sleep_for(std::chrono::seconds(2));
         }
+        log_line(std::string("[sidecar] directory auto profile push timeout account=")
+                 + account_id + " address=" + dir_addr + " peer=" + dir_userid);
       }).detach();
     }
   }
@@ -1168,6 +1239,10 @@ int main(int argc, char** argv) {
         auto fb = accounts.find(default_account_id);
         if (fb != accounts.end()) return fb->second.get();
       }
+      // Single-account sidecars are often queried through a deployment-specific
+      // account name (for example "dirs" or "default"). Treat that as the only
+      // runtime instead of reporting unknown_account forever.
+      if (accounts.size() == 1) return accounts.begin()->second.get();
       return nullptr;
     }
     auto it = accounts.find(default_account_id);
@@ -1421,6 +1496,61 @@ int main(int argc, char** argv) {
                                           group_name,
                                           seq);
       send_response(client_fd, ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+    } else if (method == "POST" && path == "/setPublicProfile") {
+      if (!account) {
+        send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"unknown_account\"}");
+        close(client_fd);
+        continue;
+      }
+
+      std::string agent_name;
+      bool has_agent_name = extract_json_string(body, "agentName", agent_name);
+      agent_name = trim_copy(agent_name);
+      size_t public_profile_start = 0;
+      size_t public_profile_end = 0;
+      bool has_public_profile = extract_json_container_by_key(
+          body, "publicProfile", '{', '}', public_profile_start, public_profile_end);
+      std::string public_profile_json = has_public_profile
+          ? trim_copy(body.substr(public_profile_start, public_profile_end - public_profile_start + 1))
+          : std::string();
+
+      if (!has_agent_name && !has_public_profile) {
+        send_response(client_fd, 400, "application/json", "{\"ok\":false,\"error\":\"missing_profile\"}");
+        close(client_fd);
+        continue;
+      }
+
+      if (has_agent_name) {
+        account->agent_name = agent_name.empty() ? account->default_agent_name : agent_name;
+      }
+      if (has_public_profile) {
+        account->public_profile_json = public_profile_json;
+      }
+
+      std::string profile_payload = build_directory_profile_payload(
+          account, openclaw_version, beagle_channel_version);
+      int pushed = 0;
+      for (const std::string& dir_addr : dir_addresses) {
+        if (!account->sdk || account->sdk->address() == dir_addr) continue;
+        std::string peer_userid = account->sdk->id_from_address(dir_addr);
+        if (peer_userid.empty()) continue;
+        if (!account->sdk->friend_is_online(peer_userid)) continue;
+        bool ok = account->sdk->send_text(peer_userid, profile_payload);
+        log_line(std::string("[sidecar] /setPublicProfile push account=") + account->account_id
+                 + " address=" + dir_addr
+                 + " peer=" + peer_userid
+                 + " result=" + (ok ? "ok" : "failed"));
+        if (ok) pushed += 1;
+      }
+
+      std::ostringstream oss;
+      oss << "{"
+          << "\"ok\":true"
+          << ",\"accountId\":\"" << json_escape(account->account_id) << "\""
+          << ",\"agentName\":\"" << json_escape(account->agent_name) << "\""
+          << ",\"pushed\":" << pushed
+          << "}";
+      send_response(client_fd, 200, "application/json", oss.str());
     } else if (method == "POST" && path == "/addFriend") {
       if (!account) {
         send_response(client_fd, 404, "application/json", "{\"ok\":false,\"error\":\"unknown_account\"}");
