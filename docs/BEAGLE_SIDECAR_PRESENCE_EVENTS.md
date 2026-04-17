@@ -73,5 +73,5 @@ When the sidecar starts, it automatically adds the OpenClaw directory as a Carri
 
 1. **Presence is emitted at startup for ALL friends** — `friend_list_callback` iterates all existing friends and emits presence for each one
 2. **Presence is also emitted on state transitions** — `friend_connection_callback` fires when a friend goes online or offline
-3. **The `/events` endpoint is drained by beagle-channel** — the directory poller uses `/directory-events` which has its own mirrored queue
+3. **The `/events` endpoint is drained by consumers** — both the directory poller and beagle-channel consume from the same queue
 4. **Use `/directory-events` for exclusive access** — this mirrored queue ensures the directory never races with beagle-channel on event consumption
