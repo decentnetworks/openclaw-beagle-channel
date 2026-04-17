@@ -1486,6 +1486,18 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       }
     })();
 
+    // Detect if this is a reflected fallback message from another agent (feedback loop breaker).
+    // When our agent is unavailable, we send a fallback; the peer's agent may also be unavailable
+    // and will send back its own fallback, creating an infinite loop. Silently discard these.
+    const FALLBACK_TEXTS = [
+      "I received your message but did not produce a final reply. Please resend.",
+      "I hit a timeout before final reply. Please resend once.",
+    ];
+    if (FALLBACK_TEXTS.includes(body.trim())) {
+      api?.logger?.info?.(`[beagle] skip reflected fallback message from peer=${normalizedPeerId}`);
+      return;
+    }
+
     const localCommandReply = maybeHandleLocalSubscriptionCommand({
       accountId,
       account,
