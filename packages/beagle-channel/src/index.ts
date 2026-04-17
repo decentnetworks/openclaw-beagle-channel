@@ -1472,6 +1472,20 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       : "";
     const body = parsedGroup?.messageText || rawBody || mediaHint;
 
+    // Detect structured system events (presence, friend_info) delivered by beagle-channel.
+    // These are synthetic messages from the sidecar — no human is waiting for a reply.
+    // Sending a fallback back to the peer creates an infinite loop when the LLM is unavailable.
+    const isSystemEvent = (() => {
+      const trimmed = body.trim();
+      if (!trimmed.startsWith("{")) return false;
+      try {
+        const parsed = JSON.parse(trimmed);
+        return typeof parsed._event === "string";
+      } catch {
+        return false;
+      }
+    })();
+
     const localCommandReply = maybeHandleLocalSubscriptionCommand({
       accountId,
       account,
@@ -1775,6 +1789,10 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
           await sendStatus("idle", "recovered_result_text", true);
           return;
         }
+        if (isSystemEvent) {
+          api?.logger?.info?.("[beagle] dispatch completed without reply for system event; skipping fallback");
+          return;
+        }
         const fallbackText = isGroup
           ? buildCarrierGroupReplyText(
               "I received your message but did not produce a final reply. Please resend.",
@@ -1788,6 +1806,10 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
     } catch (err: any) {
       api?.logger?.warn?.(`[beagle] dispatch failed duration_ms=${Date.now() - dispatchStart}: ${String(err)}`);
       if (deliveredCount === 0) {
+        if (isSystemEvent) {
+          api?.logger?.info?.("[beagle] dispatch failed for system event; skipping timeout fallback");
+          return;
+        }
         const fallbackText = isGroup
           ? buildCarrierGroupReplyText(
               "I hit a timeout before final reply. Please resend once.",
