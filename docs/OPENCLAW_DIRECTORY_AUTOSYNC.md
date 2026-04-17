@@ -1,6 +1,6 @@
 # OpenClaw Directory autosync (beagle-channel)
 
-This plugin can persist **presence** and **friend_info** sidecar events to the [OpenClaw Directory](https://github.com/0xli/directory) service **without** relying on the `dirs` LLM to call `exec`/`curl`, while still routing other traffic to the agent.
+This plugin can persist **presence**, **friend_info**, and **`{"profile":{...}}`** Carrier payloads to the [OpenClaw Directory](https://github.com/0xli/directory) service **without** relying on the `dirs` LLM to call `exec`/`curl`, while still routing other traffic to the agent.
 
 ## Behavior
 
@@ -11,8 +11,9 @@ On each inbound Beagle event, after dedupe and routing resolution:
    - **Agent guard:** only runs when the routed OpenClaw **`agentId` is exactly `dirs`**. Other Beagle accounts/agents are unchanged.
    - **`presence`:** maps `status` to `connectionStatus` `1` / `0` for the directory HTTP API.
    - **`friend_info`:** maps Carrier connection fields with **`carrierFriendConnToDirectory`**: Elastos Carrier enum order is **`0` = connected** → directory **`1`** (online); **`1` = disconnected** → directory **`0`**. Other numeric values are ignored unless they are `0` or `1`. Set **`CARRIER_FRIEND_INFO_ONE_CONNECTED=1`** if your SDK uses **`1` = connected** instead.
-3. If the HTTP POST to **`DIRECTORY_UPSERT_URL`** succeeds, the inbound handler **returns without dispatching the LLM** for that event (avoids duplicate `directory_upsert` calls and unnecessary Carrier replies for system-only payloads).
-4. If the POST fails or the event is not handled (e.g. unknown `_event`), normal **`dispatchReplyWithBufferedBlockDispatcher`** runs so the **`dirs`** agent can still process **`profile`** payloads and chat.
+3. Else if the body is **`{"profile":{...}}`** (no `_event`), attempt **`maybeUpsertDirectoryProfileMessage`**: maps **`userId`** from the DM peer id and forwards **`publicProfile`**, versions, host fields, etc., so **`publicProfile`** (from IDENTITY.md / `setPublicProfile`) is stored in SQLite.
+4. If the HTTP POST to **`DIRECTORY_UPSERT_URL`** succeeds for either handler, the inbound handler **returns without dispatching the LLM** for that event (avoids duplicate `directory_upsert` calls and unnecessary Carrier replies for system-only payloads).
+5. If the POST fails or the event is not handled, normal **`dispatchReplyWithBufferedBlockDispatcher`** runs so the **`dirs`** agent can still process chat and non-JSON payloads.
 
 ## Configuration
 
@@ -34,7 +35,8 @@ All logic lives in **`packages/beagle-channel/src/index.ts`**:
 - `extractEmbeddedSystemEventJson`
 - `normalizeSystemEventPayload`
 - `carrierFriendConnToDirectory`
-- `maybeUpsertDirectorySystemEvent` (called from `handleInboundEvent`)
+- `maybeUpsertDirectorySystemEvent`
+- `maybeUpsertDirectoryProfileMessage` (called from `handleInboundEvent`)
 
 Rebuild and copy **`dist/index.js`** into your OpenClaw beagle extension path, then restart the gateway.
 

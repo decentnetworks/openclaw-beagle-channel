@@ -889,6 +889,74 @@ async function maybeUpsertDirectorySystemEvent(params: {
   }
 }
 
+/**
+ * Sidecar `send_text` OpenClaw profile (`{"profile":{...,"publicProfile":{...}}}`).
+ * Preserves nested `publicProfile` (IDENTITY.md) to directory — the LLM path often omits it when flattening curl bodies.
+ */
+async function maybeUpsertDirectoryProfileMessage(params: {
+  agentId: string;
+  body: string;
+  fallbackPeerId: string;
+  log?: any;
+}): Promise<boolean> {
+  if (String(params.agentId || "").trim() !== "dirs") return false;
+
+  const text = extractEmbeddedSystemEventJson(String(params.body ?? "").trim()) || String(params.body ?? "").trim();
+  if (!text.startsWith("{")) return false;
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object") return false;
+  if (typeof parsed._event === "string") return false;
+  const profile = parsed.profile;
+  if (!profile || typeof profile !== "object") return false;
+
+  const userId = String(params.fallbackPeerId ?? "").trim();
+  if (!userId) return false;
+
+  const payload: Record<string, any> = {
+    userId,
+    openclawProfileSeen: true
+  };
+  if (profile.agentName != null) payload.agentName = profile.agentName;
+  if (profile.address != null) payload.address = profile.address;
+  if (profile.openclawVersion != null) payload.openclawVersion = profile.openclawVersion;
+  if (profile.beagleChannelVersion != null) payload.beagleChannelVersion = profile.beagleChannelVersion;
+  if (profile.hostName != null) payload.hostName = profile.hostName;
+  if (profile.hostIp != null) payload.hostIp = profile.hostIp;
+  if (profile.hostIpExternal != null) payload.hostIpExternal = profile.hostIpExternal;
+  if (profile.icon != null) payload.iconUrl = profile.icon;
+  if (profile.url != null) payload.homepageUrl = profile.url;
+  if (profile.publicProfile != null && typeof profile.publicProfile === "object") {
+    payload.publicProfile = profile.publicProfile;
+  }
+
+  try {
+    const directoryUpsertUrl = String(
+      process.env.DIRECTORY_UPSERT_URL || "http://127.0.0.1:3000/tools/directory_upsert"
+    );
+    const res = await fetch(directoryUpsertUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      params.log?.warn?.(`[beagle] directory_upsert profile failed status=${res.status} body=${errBody}`);
+      return false;
+    }
+    params.log?.info?.(`[beagle] directory_upsert ok event=profile user=${userId}`);
+    return true;
+  } catch (err: any) {
+    params.log?.warn?.(`[beagle] directory_upsert profile error: ${String(err)}`);
+    return false;
+  }
+}
+
 function rememberInboundSignature(signature: string) {
   if (inboundSeen.has(signature)) return false;
   inboundSeen.add(signature);
@@ -1636,6 +1704,17 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
         api?.logger?.info?.("[beagle] system event persisted directly; skipping LLM dispatch");
         return;
       }
+    }
+
+    const profileUpserted = await maybeUpsertDirectoryProfileMessage({
+      agentId: route.agentId,
+      body,
+      fallbackPeerId: conversationId,
+      log: api?.logger
+    });
+    if (profileUpserted) {
+      api?.logger?.info?.("[beagle] directory profile persisted directly; skipping LLM dispatch");
+      return;
     }
 
     // Detect if this is a reflected fallback message from another agent (feedback loop breaker).
