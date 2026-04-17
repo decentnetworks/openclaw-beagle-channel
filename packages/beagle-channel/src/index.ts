@@ -792,26 +792,20 @@ function normalizeSystemEventPayload(body: string, peerId: string) {
 
 /**
  * `friend_info.connectionStatus` is `static_cast<int>(CarrierConnectionStatus)` from beagle-sidecar.
- * In the Carrier SDK this is normally **0 = disconnected**, **1 = connected** (see `emit_friend_info_event` in beagle_sdk.cpp).
- * Set `CARRIER_FRIEND_INFO_ZERO_CONNECTED=1` only if your sidecar build uses the legacy inverted encoding.
+ * Elastos Carrier declares `CarrierConnectionStatus_Connected` first in the enum, so in C **0 = connected**
+ * and **1 = disconnected** (`carrier.h`). Directory uses **1 = online**, **0 = offline**.
+ * Set `CARRIER_FRIEND_INFO_ONE_CONNECTED=1` only if your build uses the opposite convention (1 = connected).
  */
 function carrierFriendConnToDirectory(connRaw: any): number | undefined {
   if (connRaw == null) return undefined;
-  const legacyZeroConnected =
-    String((globalThis as any).process?.env?.CARRIER_FRIEND_INFO_ZERO_CONNECTED || "").trim() === "1";
-  if (legacyZeroConnected) {
-    if (connRaw === 0 || connRaw === "0") return 1;
-    if (connRaw === 1 || connRaw === "1") return 0;
-    const n = Number(connRaw);
-    if (!Number.isFinite(n)) return undefined;
-    return n === 0 ? 1 : 0;
-  }
-  if (connRaw === 0 || connRaw === "0") return 0;
-  if (connRaw === 1 || connRaw === "1") return 1;
+  const oneConnected =
+    String((globalThis as any).process?.env?.CARRIER_FRIEND_INFO_ONE_CONNECTED || "").trim() === "1";
+  if (connRaw === 0 || connRaw === "0") return oneConnected ? 0 : 1;
+  if (connRaw === 1 || connRaw === "1") return oneConnected ? 1 : 0;
   const n = Number(connRaw);
   if (!Number.isFinite(n)) return undefined;
-  if (n === 0) return 0;
-  if (n === 1) return 1;
+  if (n === 0) return oneConnected ? 0 : 1;
+  if (n === 1) return oneConnected ? 1 : 0;
   return undefined;
 }
 

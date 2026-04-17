@@ -62,7 +62,7 @@ Presence events are JSON messages delivered via `GET /events` or `GET /directory
 Friend info events are also emitted:
 
 ```json
-{"_event":"friend_info","peer":"...","userInfo":{"name":"...","gender":"...","phone":"...","email":"...","region":"..."},"friendInfo":{"label":"...","connectionStatus":1,"presenceStatus":0}}
+{"_event":"friend_info","peer":"...","userInfo":{"name":"...","gender":"...","phone":"...","email":"...","region":"..."},"friendInfo":{"label":"...","connectionStatus":0,"presenceStatus":0}}
 ```
 
 ## Directory Auto-Bootstrap
