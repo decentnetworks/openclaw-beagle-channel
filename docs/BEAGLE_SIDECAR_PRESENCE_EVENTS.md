@@ -74,4 +74,8 @@ When the sidecar starts, it automatically adds the OpenClaw directory as a Carri
 1. **Presence is emitted at startup for ALL friends** — `friend_list_callback` iterates all existing friends and emits presence for each one
 2. **Presence is also emitted on state transitions** — `friend_connection_callback` fires when a friend goes online or offline
 3. **The `/events` endpoint is drained by consumers** — both the directory poller and beagle-channel consume from the same queue
-4. **Use `/directory-events` for exclusive access** — this mirrored queue ensures the directory never races with beagle-channel on event consumption
+4. **Use `/directory-events` for exclusive access** — this mirrored queue ensures the directory never races with beagle-channel on event consumption (optional; some deployments poll only `/events` with a single consumer per account).
+
+## OpenClaw directory integration
+
+When hosting the [OpenClaw Directory](https://github.com/0xli/directory) alongside OpenClaw, use the beagle-channel **HTTP autosync** path for `presence` / `friend_info` (see **`docs/OPENCLAW_DIRECTORY_AUTOSYNC.md`**). Presence JSON from the C++ snippets above often **omits `peer` inside `ev.text`**; the plugin injects the transport peer id before persisting.

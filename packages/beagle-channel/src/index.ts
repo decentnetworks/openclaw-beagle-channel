@@ -18,6 +18,7 @@ const CARRIER_GROUP_REPLY_PREFIX = "CGR1 ";
 const CARRIER_GROUP_STATUS_PREFIX = "CGS1 ";
 const BEAGLE_STATUS_PREFIX = "BGS1 ";
 const SUBS_STORE_PATH_DEFAULT = "~/.openclaw/workspace/memory/beagle-channel-subscriptions.json";
+const DIRECTORY_UPSERT_URL = String(process.env.DIRECTORY_UPSERT_URL || "http://127.0.0.1:3000/tools/directory_upsert");
 
 type CarrierGroupInboundEnvelope = {
   type?: string;
@@ -752,6 +753,132 @@ function normalizeInboundText(value: any) {
     .trim();
 }
 
+function extractEmbeddedSystemEventJson(raw: string) {
+  const text = String(raw ?? "").trim();
+  if (!text) return "";
+  if (text.startsWith("{") && text.endsWith("}")) return text;
+  const keyIdx = text.indexOf("\"_event\"");
+  if (keyIdx < 0) return "";
+  const start = text.lastIndexOf("{", keyIdx);
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return "";
+  return text.slice(start, end + 1).trim();
+}
+
+function normalizeSystemEventPayload(body: string, peerId: string) {
+  const text = extractEmbeddedSystemEventJson(String(body ?? "").trim()) || String(body ?? "").trim();
+  const peer = String(peerId ?? "").trim();
+  if (!text.startsWith("{") || !peer) return String(body ?? "").trim();
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || typeof parsed._event !== "string") return text;
+
+    let changed = false;
+    if (String(parsed.peer ?? "").trim() === "") {
+      parsed.peer = peer;
+      changed = true;
+    }
+    if (parsed._event === "friend_info") {
+      const friendInfo = parsed.friendInfo;
+      if (friendInfo && typeof friendInfo === "object" && String(friendInfo.userId ?? "").trim() === "") {
+        friendInfo.userId = peer;
+        changed = true;
+      }
+    }
+    return changed ? JSON.stringify(parsed) : text;
+  } catch {
+    return String(body ?? "").trim();
+  }
+}
+
+/** Carrier friend_info.connectionStatus: 0 = session connected → directory connectionStatus 1 (online). */
+function carrierFriendConnToDirectory(connRaw: any): number | undefined {
+  if (connRaw == null) return undefined;
+  if (connRaw === 0 || connRaw === "0") return 1;
+  if (typeof connRaw === "number" && Number.isFinite(connRaw)) return connRaw === 0 ? 1 : 0;
+  if (typeof connRaw === "string" && connRaw.trim() !== "" && !Number.isNaN(Number(connRaw))) {
+    return Number(connRaw) === 0 ? 1 : 0;
+  }
+  return undefined;
+}
+
+async function maybeUpsertDirectorySystemEvent(params: {
+  accountId: string;
+  /** OpenClaw agent id receiving this inbound (from routing); only `dirs` may auto-write directory.db */
+  agentId: string;
+  body: string;
+  fallbackPeerId: string;
+  log?: any;
+}) {
+  if (String(params.agentId || "").trim() !== "dirs") return false;
+
+  const text = extractEmbeddedSystemEventJson(String(params.body ?? "").trim()) || String(params.body ?? "").trim();
+  if (!text.startsWith("{")) return false;
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || typeof parsed._event !== "string") return false;
+
+  const nowPeer = String(parsed.peer ?? params.fallbackPeerId ?? "").trim();
+  let payload: Record<string, any> | null = null;
+
+  if (parsed._event === "presence") {
+    if (!nowPeer) return false;
+    const status = String(parsed.status ?? "").toLowerCase();
+    const connectionStatus = status === "online" ? 1 : status === "offline" ? 0 : undefined;
+    if (connectionStatus === undefined) return false;
+    payload = { userId: nowPeer, connectionStatus };
+  } else if (parsed._event === "friend_info") {
+    const friendInfo = parsed.friendInfo && typeof parsed.friendInfo === "object" ? parsed.friendInfo : {};
+    const userInfo = parsed.userInfo && typeof parsed.userInfo === "object" ? parsed.userInfo : {};
+    const userId = String(friendInfo.userId ?? nowPeer).trim();
+    if (!userId) return false;
+
+    let connectionStatus: number | undefined;
+    if (friendInfo.connectionStatus != null) {
+      connectionStatus = carrierFriendConnToDirectory(friendInfo.connectionStatus);
+    } else if (friendInfo.status != null) {
+      connectionStatus = carrierFriendConnToDirectory(friendInfo.status);
+    }
+
+    payload = {
+      userId,
+      name: userInfo.name ?? friendInfo.name ?? undefined,
+      gender: userInfo.gender ?? undefined,
+      phone: userInfo.phone ?? undefined,
+      email: userInfo.email ?? undefined,
+      region: userInfo.region ?? undefined,
+      label: friendInfo.label ?? undefined,
+      presence: friendInfo.presenceStatus ?? friendInfo.presence ?? undefined,
+      connectionStatus
+    };
+  } else {
+    return false;
+  }
+
+  try {
+    const res = await fetch(DIRECTORY_UPSERT_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      params.log?.warn?.(`[beagle] directory_upsert failed status=${res.status} body=${body}`);
+      return false;
+    }
+    params.log?.info?.(`[beagle] directory_upsert ok event=${parsed._event} user=${String(payload.userId || "")}`);
+    return true;
+  } catch (err: any) {
+    params.log?.warn?.(`[beagle] directory_upsert error: ${String(err)}`);
+    return false;
+  }
+}
+
 function rememberInboundSignature(signature: string) {
   if (inboundSeen.has(signature)) return false;
   inboundSeen.add(signature);
@@ -1470,13 +1597,14 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
     const mediaHint = hasInboundMedia
       ? `Image attached${inboundFilename ? `: ${inboundFilename}` : ""}.`
       : "";
-    const body = parsedGroup?.messageText || rawBody || mediaHint;
+    const bodyRaw = parsedGroup?.messageText || rawBody || mediaHint;
+    const body = normalizeSystemEventPayload(bodyRaw, conversationId);
 
     // Detect structured system events (presence, friend_info) delivered by beagle-channel.
     // These are synthetic messages from the sidecar — no human is waiting for a reply.
     // Sending a fallback back to the peer creates an infinite loop when the LLM is unavailable.
     const isSystemEvent = (() => {
-      const trimmed = body.trim();
+      const trimmed = extractEmbeddedSystemEventJson(body) || body.trim();
       if (!trimmed.startsWith("{")) return false;
       try {
         const parsed = JSON.parse(trimmed);
@@ -1485,6 +1613,20 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
         return false;
       }
     })();
+
+    if (isSystemEvent) {
+      const upserted = await maybeUpsertDirectorySystemEvent({
+        accountId,
+        agentId: route.agentId,
+        body,
+        fallbackPeerId: conversationId,
+        log: api?.logger
+      });
+      if (upserted) {
+        api?.logger?.info?.("[beagle] system event persisted directly; skipping LLM dispatch");
+        return;
+      }
+    }
 
     // Detect if this is a reflected fallback message from another agent (feedback loop breaker).
     // When our agent is unavailable, we send a fallback; the peer's agent may also be unavailable
