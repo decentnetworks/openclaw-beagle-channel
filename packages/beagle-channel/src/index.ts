@@ -977,15 +977,25 @@ function carrierFriendConnToDirectory(connRaw: any): number | undefined {
   return undefined;
 }
 
+/** Which OpenClaw agents may call `directory_upsert` for autosync (comma-separated). Default `dirs`. */
+function isDirectoryAutosyncAgent(agentId: string): boolean {
+  const raw = String(process.env.BEAGLE_DIRECTORY_AUTOSYNC_AGENTS || "").trim();
+  const allowed = (raw ? raw : "dirs")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return allowed.includes(String(agentId || "").trim());
+}
+
 async function maybeUpsertDirectorySystemEvent(params: {
   accountId: string;
-  /** OpenClaw agent id receiving this inbound (from routing); only `dirs` may auto-write directory.db */
+  /** OpenClaw agent id receiving this inbound (from routing); must be in BEAGLE_DIRECTORY_AUTOSYNC_AGENTS (default: dirs) */
   agentId: string;
   body: string;
   fallbackPeerId: string;
   log?: any;
 }) {
-  if (String(params.agentId || "").trim() !== "dirs") return false;
+  if (!isDirectoryAutosyncAgent(params.agentId)) return false;
 
   const text = extractEmbeddedSystemEventJson(String(params.body ?? "").trim()) || String(params.body ?? "").trim();
   if (!text.startsWith("{")) return false;
@@ -1067,7 +1077,7 @@ async function maybeUpsertDirectoryProfileMessage(params: {
   fallbackPeerId: string;
   log?: any;
 }): Promise<boolean> {
-  if (String(params.agentId || "").trim() !== "dirs") return false;
+  if (!isDirectoryAutosyncAgent(params.agentId)) return false;
 
   const text = extractEmbeddedSystemEventJson(String(params.body ?? "").trim()) || String(params.body ?? "").trim();
   if (!text.startsWith("{")) return false;

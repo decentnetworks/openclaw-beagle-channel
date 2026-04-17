@@ -20,6 +20,7 @@ On each inbound Beagle event, after dedupe and routing resolution:
 | Environment variable | Default | Purpose |
 |----------------------|---------|---------|
 | `DIRECTORY_UPSERT_URL` | `http://127.0.0.1:3000/tools/directory_upsert` | Directory HTTP tool base (POST JSON body) |
+| `BEAGLE_DIRECTORY_AUTOSYNC_AGENTS` | `dirs` | Comma-separated OpenClaw **`agentId`** values that may HTTP-write the directory (profile + presence). If inbound Beagle routes to **`main`** or **`beagle-profile`** instead of **`dirs`**, autosync is skipped unless you add those ids here (e.g. `dirs,beagle-profile`) or add a **`channel: beagle`** binding to **`dirs`**. |
 | `CARRIER_FRIEND_INFO_ONE_CONNECTED` | unset | Set to **`1`** only if `friend_info` uses **`1` = connected** (non‑Elastos enum order) |
 
 The directory web server must expose **`POST /tools/directory_upsert`** (no auth in stock directory).
