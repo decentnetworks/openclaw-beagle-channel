@@ -18,7 +18,6 @@ const CARRIER_GROUP_REPLY_PREFIX = "CGR1 ";
 const CARRIER_GROUP_STATUS_PREFIX = "CGS1 ";
 const BEAGLE_STATUS_PREFIX = "BGS1 ";
 const SUBS_STORE_PATH_DEFAULT = "~/.openclaw/workspace/memory/beagle-channel-subscriptions.json";
-const DIRECTORY_UPSERT_URL = String(process.env.DIRECTORY_UPSERT_URL || "http://127.0.0.1:3000/tools/directory_upsert");
 
 type CarrierGroupInboundEnvelope = {
   type?: string;
@@ -791,14 +790,28 @@ function normalizeSystemEventPayload(body: string, peerId: string) {
   }
 }
 
-/** Carrier friend_info.connectionStatus: 0 = session connected → directory connectionStatus 1 (online). */
+/**
+ * `friend_info.connectionStatus` is `static_cast<int>(CarrierConnectionStatus)` from beagle-sidecar.
+ * In the Carrier SDK this is normally **0 = disconnected**, **1 = connected** (see `emit_friend_info_event` in beagle_sdk.cpp).
+ * Set `CARRIER_FRIEND_INFO_ZERO_CONNECTED=1` only if your sidecar build uses the legacy inverted encoding.
+ */
 function carrierFriendConnToDirectory(connRaw: any): number | undefined {
   if (connRaw == null) return undefined;
-  if (connRaw === 0 || connRaw === "0") return 1;
-  if (typeof connRaw === "number" && Number.isFinite(connRaw)) return connRaw === 0 ? 1 : 0;
-  if (typeof connRaw === "string" && connRaw.trim() !== "" && !Number.isNaN(Number(connRaw))) {
-    return Number(connRaw) === 0 ? 1 : 0;
+  const legacyZeroConnected =
+    String((globalThis as any).process?.env?.CARRIER_FRIEND_INFO_ZERO_CONNECTED || "").trim() === "1";
+  if (legacyZeroConnected) {
+    if (connRaw === 0 || connRaw === "0") return 1;
+    if (connRaw === 1 || connRaw === "1") return 0;
+    const n = Number(connRaw);
+    if (!Number.isFinite(n)) return undefined;
+    return n === 0 ? 1 : 0;
   }
+  if (connRaw === 0 || connRaw === "0") return 0;
+  if (connRaw === 1 || connRaw === "1") return 1;
+  const n = Number(connRaw);
+  if (!Number.isFinite(n)) return undefined;
+  if (n === 0) return 0;
+  if (n === 1) return 1;
   return undefined;
 }
 
@@ -861,7 +874,10 @@ async function maybeUpsertDirectorySystemEvent(params: {
   }
 
   try {
-    const res = await fetch(DIRECTORY_UPSERT_URL, {
+    const directoryUpsertUrl = String(
+      process.env.DIRECTORY_UPSERT_URL || "http://127.0.0.1:3000/tools/directory_upsert"
+    );
+    const res = await fetch(directoryUpsertUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload)

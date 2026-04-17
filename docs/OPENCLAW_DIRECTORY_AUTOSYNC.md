@@ -10,7 +10,7 @@ On each inbound Beagle event, after dedupe and routing resolution:
 2. If the body is a structured system event (`_event` is present), attempt **`maybeUpsertDirectorySystemEvent`**:
    - **Agent guard:** only runs when the routed OpenClaw **`agentId` is exactly `dirs`**. Other Beagle accounts/agents are unchanged.
    - **`presence`:** maps `status` to `connectionStatus` `1` / `0` for the directory HTTP API.
-   - **`friend_info`:** maps Carrier connection fields with **`carrierFriendConnToDirectory`**: numeric **`0` / `"0"` = connected** → directory **`connectionStatus: 1`** (online); other numeric values → **`0`** (offline). Non-numeric `status` strings are ignored for connection mapping.
+   - **`friend_info`:** maps Carrier connection fields with **`carrierFriendConnToDirectory`**: normally **`0` / `"0"` = disconnected** → directory **`0`**; **`1` / `"1"` = connected** → directory **`1`**. Other numeric values are passed through only when they are `0` or `1`; otherwise connection is omitted from the payload. Set **`CARRIER_FRIEND_INFO_ZERO_CONNECTED=1`** if your sidecar uses the legacy inverted encoding (`0` meant connected).
 3. If the HTTP POST to **`DIRECTORY_UPSERT_URL`** succeeds, the inbound handler **returns without dispatching the LLM** for that event (avoids duplicate `directory_upsert` calls and unnecessary Carrier replies for system-only payloads).
 4. If the POST fails or the event is not handled (e.g. unknown `_event`), normal **`dispatchReplyWithBufferedBlockDispatcher`** runs so the **`dirs`** agent can still process **`profile`** payloads and chat.
 
@@ -19,6 +19,7 @@ On each inbound Beagle event, after dedupe and routing resolution:
 | Environment variable | Default | Purpose |
 |----------------------|---------|---------|
 | `DIRECTORY_UPSERT_URL` | `http://127.0.0.1:3000/tools/directory_upsert` | Directory HTTP tool base (POST JSON body) |
+| `CARRIER_FRIEND_INFO_ZERO_CONNECTED` | unset | Set to **`1`** only if `friend_info` uses legacy encoding where **`0` = connected** |
 
 The directory web server must expose **`POST /tools/directory_upsert`** (no auth in stock directory).
 
