@@ -355,6 +355,146 @@ function resolveWorkspaceRoot(cfg: any) {
   return resolve(home, ".openclaw/workspace");
 }
 
+/** Workspace root for a named OpenClaw agent (multi-agent); null if unknown. */
+function workspaceForOpenclawAgentId(cfg: any, agentId: string): string | null {
+  const id = String(agentId || "").trim();
+  if (!id) return null;
+  const home = process.env.HOME || "";
+
+  const list = cfg?.agents?.list;
+  if (Array.isArray(list)) {
+    for (const a of list) {
+      const aid = String(a?.id ?? a?.agentId ?? a?.name ?? "").trim();
+      if (aid !== id) continue;
+      const ws = String(a?.workspace ?? "").trim();
+      if (ws) return resolve(expandHomePath(ws));
+      break;
+    }
+  }
+
+  const block = cfg?.agents?.[id];
+  if (block && typeof block === "object") {
+    const ws = String((block as { workspace?: string }).workspace ?? "").trim();
+    if (ws) return resolve(expandHomePath(ws));
+  }
+
+  if (home) {
+    if (id === "main") {
+      return resolve(home, ".openclaw/workspace");
+    }
+    const suffixed = resolve(home, `.openclaw/workspace-${id}`);
+    try {
+      if (existsSync(suffixed)) return suffixed;
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Which workspace holds `IDENTITY.md` for Carrier public profile sync.
+ * Without `identityAgentId`, matches legacy behavior (defaults / OPENCLAW_PROFILE).
+ */
+function resolveWorkspaceForIdentity(cfg: any, identityAgentId?: string): string {
+  const id = String(identityAgentId ?? "").trim();
+  if (!id) return resolveWorkspaceRoot(cfg);
+  const resolved = workspaceForOpenclawAgentId(cfg, id);
+  return resolved ?? resolveWorkspaceRoot(cfg);
+}
+
+function getDefaultBeagleAccountId(cfg: any): string {
+  const explicit = cfg?.channels?.beagle?.defaultAccount;
+  if (explicit != null && String(explicit).trim()) return String(explicit).trim();
+  const keys = Object.keys(cfg?.channels?.beagle?.accounts ?? {});
+  if (keys.length) return [...keys].sort()[0];
+  return "default";
+}
+
+function bindingMatchesBeagleAccount(match: any, accountId: string, defaultAccountId: string): boolean {
+  const raw = match?.accountId;
+  if (raw === "*") return true;
+  if (raw === undefined || raw === null || raw === "") {
+    return accountId === defaultAccountId;
+  }
+  return String(raw) === String(accountId);
+}
+
+/**
+ * Uses the same `bindings` as `openclaw agents list` / inbound routing (see OpenClaw multi-agent docs).
+ * - Account-wide beagle binding (no `match.peer`) wins (first in config order).
+ * - Else if all peer-specific bindings for this account agree on one `agentId`, use it (typical: one directory DM peer → one agent).
+ */
+function resolveIdentityAgentIdFromOpenClawBindings(
+  cfg: any,
+  accountId: string
+): { agentId?: string; ambiguousPeerAgents?: boolean } {
+  const defaultAcc = getDefaultBeagleAccountId(cfg);
+  const bindings = Array.isArray(cfg?.bindings) ? cfg.bindings : [];
+  const accountWide: string[] = [];
+  const peerScoped: string[] = [];
+
+  for (const b of bindings) {
+    const m = b?.match;
+    if (!m || String(m.channel || "").trim() !== "beagle") continue;
+    if (!bindingMatchesBeagleAccount(m, accountId, defaultAcc)) continue;
+    const aid = String(b?.agentId || "").trim();
+    if (!aid) continue;
+    const hasPeer = m.peer != null && m.peer !== undefined;
+    if (!hasPeer) {
+      accountWide.push(aid);
+    } else {
+      peerScoped.push(aid);
+    }
+  }
+
+  if (accountWide.length > 0) {
+    return { agentId: accountWide[0] };
+  }
+
+  const uniq = [...new Set(peerScoped)];
+  if (uniq.length === 1) {
+    return { agentId: uniq[0] };
+  }
+  if (uniq.length > 1) {
+    return { ambiguousPeerAgents: true };
+  }
+  return {};
+}
+
+function tryResolveIdentityAgentIdFromRuntime(api: any, cfg: any, accountId: string): string | undefined {
+  const routing = api?.runtime?.channel?.routing;
+  if (typeof routing?.resolveAgentRoute !== "function") return undefined;
+  try {
+    const route = routing.resolveAgentRoute({
+      cfg,
+      channel: "beagle",
+      accountId,
+      peer: { kind: "dm", id: "__beagle_identity_probe__" }
+    });
+    const id = String(route?.agentId || "").trim();
+    return id || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Picks which OpenClaw agent’s workspace supplies IDENTITY.md for this Beagle account — uses `bindings` when set (same source as inbound routing). */
+function resolveIdentityAgentIdForAccount(api: any, cfg: any, accountId: string, log?: any): string | undefined {
+  const fromBindings = resolveIdentityAgentIdFromOpenClawBindings(cfg, accountId);
+  if (fromBindings.ambiguousPeerAgents) {
+    log?.warn?.(
+      `[beagle] identity: conflicting peer-only beagle bindings for account=${accountId}; add one account-wide binding or set channels.beagle.accounts.${accountId}.identityAgentId`
+    );
+    return undefined;
+  }
+  if (fromBindings.agentId) {
+    return fromBindings.agentId;
+  }
+  return tryResolveIdentityAgentIdFromRuntime(api, cfg, accountId);
+}
+
 function normalizeIdentityValue(raw: string) {
   let value = String(raw ?? "").trim();
   if (!value) return "";
@@ -419,8 +559,12 @@ function resolveIdentityAvatar(value: string, workspaceRoot: string, log?: any) 
   }
 }
 
-function loadIdentityProfileSnapshot(cfg: any, log?: any): IdentityProfileSnapshot | null {
-  const workspaceRoot = resolveWorkspaceRoot(cfg);
+function loadIdentityProfileSnapshot(
+  cfg: any,
+  log?: any,
+  opts?: { identityAgentId?: string }
+): IdentityProfileSnapshot | null {
+  const workspaceRoot = resolveWorkspaceForIdentity(cfg, opts?.identityAgentId);
   const sourcePath = join(workspaceRoot, "IDENTITY.md");
   try {
     if (!existsSync(sourcePath)) return null;
@@ -479,10 +623,25 @@ function loadIdentityProfileSnapshot(cfg: any, log?: any): IdentityProfileSnapsh
   };
 }
 
+/** DM from directory service asking this node to push IDENTITY/publicProfile (sidecar skips send when friend was offline). */
+function isOpenclawDirectoryProfileRequest(body: string): boolean {
+  const t = String(body ?? "").trim();
+  if (!t.startsWith("{")) return false;
+  try {
+    const o = JSON.parse(t);
+    return o?._openclaw_directory_request === "public_profile_v1";
+  } catch {
+    return false;
+  }
+}
+
 function createIdentityProfileSync(params: {
   cfg: any;
+  api?: any;
   client: ReturnType<typeof createSidecarClient>;
   accountId: string;
+  /** Optional override; if unset, agent id is taken from OpenClaw `bindings` / runtime routing. */
+  identityAgentId?: string;
   log?: any;
 }) {
   const intervalMs = Math.max(10000, Number(process.env.BEAGLE_IDENTITY_SYNC_MS || 30000));
@@ -494,10 +653,19 @@ function createIdentityProfileSync(params: {
     if (!force && now - lastCheckAt < intervalMs) return;
     lastCheckAt = now;
 
-    const snapshot = loadIdentityProfileSnapshot(params.cfg, params.log);
+    const explicit = String(params.identityAgentId || "").trim();
+    const routed =
+      explicit ||
+      resolveIdentityAgentIdForAccount(params.api, params.cfg, params.accountId, params.log) ||
+      "";
+    const snapshot = loadIdentityProfileSnapshot(params.cfg, params.log, {
+      identityAgentId: routed || undefined
+    });
     const fingerprint = snapshot?.fingerprint || "";
-    if (fingerprint === lastFingerprint) return;
+    if (!force && fingerprint === lastFingerprint) return;
     lastFingerprint = fingerprint;
+
+    const label = explicit ? `${explicit} (explicit)` : routed ? routed : "(default workspace)";
 
     try {
       const result = await params.client.setPublicProfile({
@@ -506,7 +674,7 @@ function createIdentityProfileSync(params: {
       });
       if (snapshot) {
         params.log?.info?.(
-          `[beagle] synced IDENTITY.md account=${params.accountId} pushed=${Number(result?.pushed || 0)} path=${snapshot.sourcePath}`
+          `[beagle] synced IDENTITY.md account=${params.accountId} identityAgent=${label} pushed=${Number(result?.pushed || 0)} path=${snapshot.sourcePath}`
         );
       } else {
         params.log?.info?.(
@@ -1345,7 +1513,14 @@ async function runInboundPollLoop({
   log?: any;
 }) {
   const client = createSidecarClient(account);
-  const syncIdentityProfile = createIdentityProfileSync({ cfg, client, accountId, log });
+  const syncIdentityProfile = createIdentityProfileSync({
+    api,
+    cfg,
+    client,
+    accountId,
+    identityAgentId: account.identityAgentId,
+    log
+  });
   await syncIdentityProfile(true);
   const controller = new AbortController();
   const relayAbort = () => controller.abort();
@@ -1565,6 +1740,32 @@ function resolveAccount(cfg: any, accountId?: string): BeagleAccount {
 
 async function handleInboundEvent(api: any, accountId: string, account: BeagleAccount, ev: any) {
   try {
+    const rawBodyEarly = normalizeInboundText(ev?.text ?? "");
+    const inboundMediaUrlEarly = ev?.mediaUrl ?? "";
+    const inboundMediaPathEarly = ev?.mediaPath ?? "";
+    const hasInboundMediaEarly = Boolean(inboundMediaUrlEarly || inboundMediaPathEarly);
+    // Runs before dedupe/dispatcher: directory asks us to push profile after Carrier missed earlier send_text.
+    if (!hasInboundMediaEarly && isOpenclawDirectoryProfileRequest(rawBodyEarly)) {
+      const client = createSidecarClient(account);
+      const sync = createIdentityProfileSync({
+        api,
+        cfg: api?.config ?? {},
+        client,
+        accountId,
+        identityAgentId: account.identityAgentId,
+        log: api?.logger
+      });
+      try {
+        await sync(true);
+        api?.logger?.info?.(
+          `[beagle] directory profile request handled account=${accountId} peer=${String(ev?.peer ?? "")}`
+        );
+      } catch (err: any) {
+        api?.logger?.warn?.(`[beagle] directory profile request sync failed: ${String(err)}`);
+      }
+      return;
+    }
+
     const core = api?.runtime;
     api?.logger?.info?.(`[beagle] handleInboundEvent peer=${String(ev?.peer ?? "")} text_len=${(ev?.text ?? "").length}`);
     if (!core?.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher) {
@@ -1572,8 +1773,8 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       return;
     }
 
-    const rawBody = normalizeInboundText(ev?.text ?? "");
-    const inboundMediaUrl = ev?.mediaUrl ?? "";
+    const rawBody = rawBodyEarly;
+    const inboundMediaUrl = inboundMediaUrlEarly;
     const inboundMediaPath = ev?.mediaPath ?? "";
     const inboundMediaType = ev?.mediaType ?? "";
     const inboundFilename = ev?.filename ?? "";

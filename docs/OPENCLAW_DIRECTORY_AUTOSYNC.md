@@ -28,6 +28,24 @@ The directory web server must expose **`POST /tools/directory_upsert`** (no auth
 
 If the **directory** `web/server.js` **sidecar poller** is enabled (`DIRECTORY_SIDECAR_EVENTS_POLL=1`), it competes with this plugin for the **same drained** `GET /events` queue on the Beagle account. Leave that poller **off** on hosts where OpenClaw beagle-channel is running (default in the directory repo).
 
+### Multi-agent: which `IDENTITY.md` is published?
+
+Carrier exposes **one** public profile per Beagle/sidecar account (one Carrier user id). Identity sync reads a single **`IDENTITY.md`** from one OpenClaw workspace.
+
+**Default (no extra keys):** the plugin resolves the agent the same way as [multi-agent routing](https://docs.openclaw.ai/concepts/multi-agent) — it reads top-level **`bindings`** for `channel: "beagle"` and your Beagle **`accountId`** (e.g. `dirs`):
+
+1. An **account-wide** binding (no `match.peer`) → first matching `agentId` wins.  
+2. Else, if **every** peer-specific binding for that account uses the **same** `agentId` (typical: one directory friend → one routed agent such as `beagle-profile`) → that agent’s workspace is used.  
+3. Else the plugin may call runtime **`resolveAgentRoute`** with a synthetic peer, then falls back to **`agents.defaults`** / **`~/.openclaw/workspace`** (same as before).
+
+So if **`openclaw agents list --bindings`** shows your directory traffic going to `beagle-profile`, identity sync should pick **`~/.openclaw/workspace-beagle-profile/IDENTITY.md`** without adding anything under `channels.beagle.accounts`.
+
+**Optional override:** set **`identityAgentId`** on the Beagle account only when bindings are ambiguous (multiple peer routes to different agents) or you need to force a specific workspace.
+
+Workspace resolution for a chosen agent id follows OpenClaw: `agents.list[].workspace`, `agents.<id>.workspace`, or `~/.openclaw/workspace` / `~/.openclaw/workspace-<id>`.
+
+Then rebuild the beagle-channel extension and restart the gateway.
+
 ## Implementation
 
 All logic lives in **`packages/beagle-channel/src/index.ts`**:

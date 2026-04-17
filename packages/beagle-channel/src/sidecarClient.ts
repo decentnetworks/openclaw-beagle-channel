@@ -3,6 +3,12 @@ export type BeagleAccount = {
   enabled?: boolean;
   sidecarBaseUrl: string;
   authToken?: string;
+  /**
+   * Optional override for which OpenClaw agent’s workspace supplies `IDENTITY.md` for Carrier
+   * `setPublicProfile`. If unset, the plugin uses **`bindings`** (same as inbound routing) or
+   * runtime `resolveAgentRoute`, then falls back to the default workspace.
+   */
+  identityAgentId?: string;
   trustedGroupPeers?: string[];
   trustedGroupAddresses?: string[];
   groupPeers?: string[];
