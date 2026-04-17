@@ -74,6 +74,11 @@ bool BeagleSdk::friend_is_online(const std::string& userid) const {
   return true;
 }
 
+bool BeagleSdk::has_friend(const std::string& address) const {
+  (void)address;
+  return true;
+}
+
 bool BeagleSdk::send_media(const std::string& peer,
                            const std::string& caption,
                            const std::string& media_path,
