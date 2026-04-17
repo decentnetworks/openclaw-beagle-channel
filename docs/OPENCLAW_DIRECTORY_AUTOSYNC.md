@@ -22,6 +22,10 @@ On each inbound Beagle event, after dedupe and routing resolution:
 
 The directory web server must expose **`POST /tools/directory_upsert`** (no auth in stock directory).
 
+### Do not double-consume `/events`
+
+If the **directory** `web/server.js` **sidecar poller** is enabled (`DIRECTORY_SIDECAR_EVENTS_POLL=1`), it competes with this plugin for the **same drained** `GET /events` queue on the Beagle account. Leave that poller **off** on hosts where OpenClaw beagle-channel is running (default in the directory repo).
+
 ## Implementation
 
 All logic lives in **`packages/beagle-channel/src/index.ts`**:
