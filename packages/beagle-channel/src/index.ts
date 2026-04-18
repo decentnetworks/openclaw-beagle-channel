@@ -1697,8 +1697,9 @@ export default function register(api: any) {
     },
     config: {
       listAccountIds: (cfg: any) => {
-        const ids = Object.keys(cfg?.channels?.beagle?.accounts ?? {});
-        return ids.length > 0 ? ids : ["default"];
+        const info = listBeagleAccountIdsWithAutoGrow(cfg);
+        logBeagleAutoGrowOnce(api, info);
+        return info.ids;
       },
       defaultAccountId: () => "default",
       isConfigured: () => true,
@@ -1770,18 +1771,111 @@ export default function register(api: any) {
   });
 }
 
-function resolveAccount(cfg: any, accountId?: string): BeagleAccount {
-  const acc = cfg?.channels?.beagle?.accounts?.[accountId ?? "default"];
-  if (!acc) {
+/**
+ * Collect agent ids from `cfg.agents.list` (and `cfg.agents.<id>` blocks) for auto-grow.
+ * Sidecar creates one Carrier identity per `agents.list[].id`; we mirror that so each agent
+ * gets its own beagle account/poller without operators duplicating config under
+ * `channels.beagle.accounts`.
+ */
+function collectOpenclawAgentIds(cfg: any): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: any) => {
+    const id = String(raw ?? "").trim();
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  };
+  const list = cfg?.agents?.list;
+  if (Array.isArray(list)) {
+    for (const a of list) push(a?.id ?? a?.agentId ?? a?.name);
+  }
+  const agentsBlock = cfg?.agents;
+  if (agentsBlock && typeof agentsBlock === "object") {
+    for (const [k, v] of Object.entries(agentsBlock)) {
+      if (k === "list" || k === "defaults") continue;
+      if (v && typeof v === "object") push(k);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Union of explicit `channels.beagle.accounts` keys and OpenClaw agent ids, so multi-agent
+ * deployments don't silently half-configure (sidecar grows to match agents.list; the
+ * channel config did not, which meant only one agent ever ran IDENTITY.md sync).
+ *
+ * Auto-grow only fires when at least one explicit account exists — its `sidecarBaseUrl`
+ * and `authToken` are reused as a template for synthesized entries.
+ */
+function listBeagleAccountIdsWithAutoGrow(cfg: any): {
+  ids: string[];
+  synthesized: string[];
+  templateId: string | null;
+} {
+  const explicit = cfg?.channels?.beagle?.accounts ?? {};
+  const explicitIds = Object.keys(explicit);
+  const agentIds = collectOpenclawAgentIds(cfg);
+
+  if (explicitIds.length === 0) {
     return {
-      accountId: accountId ?? "default",
-      sidecarBaseUrl: "http://127.0.0.1:39091"
+      ids: agentIds.length > 0 ? agentIds : ["default"],
+      synthesized: [],
+      templateId: null
     };
   }
+
+  const merged = new Set<string>(explicitIds);
+  const synthesized: string[] = [];
+  for (const id of agentIds) {
+    if (!merged.has(id)) {
+      merged.add(id);
+      synthesized.push(id);
+    }
+  }
+  return { ids: Array.from(merged), synthesized, templateId: explicitIds[0] };
+}
+
+const _autogrowLogged = new Set<string>();
+function logBeagleAutoGrowOnce(api: any, info: ReturnType<typeof listBeagleAccountIdsWithAutoGrow>): void {
+  if (info.synthesized.length === 0) return;
+  const key = info.synthesized.slice().sort().join("|") + "::" + (info.templateId ?? "");
+  if (_autogrowLogged.has(key)) return;
+  _autogrowLogged.add(key);
+  api?.logger?.info?.(
+    `[beagle] auto-grew channels.beagle.accounts from agents.list: synthesized=[${info.synthesized.join(", ")}]` +
+      (info.templateId ? ` template=${info.templateId}` : "") +
+      ` — ensure openclaw.json has matching bindings {channel:"beagle",accountId:"<id>"} -> agentId:"<id>" for routing`
+  );
+}
+
+function resolveAccount(cfg: any, accountId?: string): BeagleAccount {
+  const id = accountId ?? "default";
+  const accounts = cfg?.channels?.beagle?.accounts ?? {};
+  const acc = accounts[id];
+  if (acc) {
+    return {
+      accountId: id,
+      sidecarBaseUrl: "http://127.0.0.1:39091",
+      ...acc
+    };
+  }
+  // Auto-grow: if id matches an agent in agents.list, reuse the first explicit account as template.
+  const matchesAgent = collectOpenclawAgentIds(cfg).includes(id);
+  if (matchesAgent) {
+    const explicitIds = Object.keys(accounts);
+    if (explicitIds.length > 0) {
+      const template = accounts[explicitIds[0]] ?? {};
+      return {
+        accountId: id,
+        sidecarBaseUrl: "http://127.0.0.1:39091",
+        ...template
+      };
+    }
+  }
   return {
-    accountId: accountId ?? "default",
-    sidecarBaseUrl: "http://127.0.0.1:39091",
-    ...acc
+    accountId: id,
+    sidecarBaseUrl: "http://127.0.0.1:39091"
   };
 }
 
