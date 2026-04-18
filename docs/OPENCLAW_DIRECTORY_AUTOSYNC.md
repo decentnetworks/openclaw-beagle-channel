@@ -30,6 +30,69 @@ The directory web server must expose **`POST /tools/directory_upsert`** (no auth
 
 If the **directory** `web/server.js` **sidecar poller** is enabled (`DIRECTORY_SIDECAR_EVENTS_POLL=1`), it competes with this plugin for the **same drained** `GET /events` queue on the Beagle account. Leave that poller **off** on hosts where OpenClaw beagle-channel is running (default in the directory repo).
 
+### Multi-agent: auto-grow `channels.beagle.accounts`
+
+Beagle-sidecar creates one Carrier identity per entry in `agents.list`. Before auto-grow, the plugin only spawned inbound pollers / ran IDENTITY.md sync for accounts **explicitly** declared under `channels.beagle.accounts`, so extra agents got a Carrier address but **no public profile publish** — the directory stored metadata-only rows with empty `publicProfile`/`identity`.
+
+As of **`895884d`**, the plugin takes the **union** of `channels.beagle.accounts` keys and `agents.list[].id` at startup:
+
+1. **`listAccountIds`** returns every explicit account **plus** every OpenClaw agent id not already in the map. The gateway then spawns one inbound poll loop per id.
+2. **`resolveAccount`** for a synthesized id reuses the **first explicit account** as a template (copies `sidecarBaseUrl` and `authToken`). So you only have to declare one beagle account with credentials; the rest are synthesized.
+3. A one-shot log line fires at gateway start:
+   ```
+   [beagle] auto-grew channels.beagle.accounts from agents.list: synthesized=[beagle-profile] template=default — ensure openclaw.json has matching bindings {channel:"beagle",accountId:"<id>"} -> agentId:"<id>" for routing
+   ```
+4. **Guard:** auto-grow only runs when at least one explicit account exists (its config becomes the template). Zero explicit accounts → legacy behavior (`["default"]`), no surprise traffic.
+
+#### What you still have to declare by hand
+
+**`bindings`** — routing lives in the gateway core, not in this plugin. For each synthesized account you need:
+
+```json
+{
+  "agentId": "<agentId>",
+  "match": { "channel": "beagle", "accountId": "<agentId>" }
+}
+```
+
+(The convention `accountId === agentId` keeps bindings trivial and lets the existing `resolveIdentityAgentIdFromOpenClawBindings` step pick the right workspace for IDENTITY.md.)
+
+#### Minimal multi-agent config
+
+With two agents (`main`, `beagle-profile`) the whole beagle section collapses to:
+
+```json
+"agents": {
+  "list": [
+    { "id": "main" },
+    { "id": "beagle-profile" }
+  ]
+},
+"channels": {
+  "beagle": {
+    "accounts": {
+      "main": {
+        "enabled": true,
+        "sidecarBaseUrl": "http://127.0.0.1:39091",
+        "authToken": "devtoken"
+      }
+    }
+  }
+},
+"bindings": [
+  { "agentId": "main",           "match": { "channel": "beagle", "accountId": "main" } },
+  { "agentId": "beagle-profile", "match": { "channel": "beagle", "accountId": "beagle-profile" } }
+]
+```
+
+The plugin synthesizes `channels.beagle.accounts["beagle-profile"]` at runtime from the `main` template. Workspace resolution still follows `agents.list[].workspace` / `~/.openclaw/workspace-<id>`, so `IDENTITY.md` is read per-agent.
+
+#### Verifying on a host
+
+1. Restart the gateway, grep the journal for `auto-grew channels.beagle.accounts`. If the line doesn't appear, either the agents are all already declared or `agents.list` is empty.
+2. Look for `synced IDENTITY.md account=<id> identityAgent=<id> pushed=N` — one line per agent confirms each account ran setPublicProfile.
+3. On the directory host, `GET /api/agents/<carrierUserId>` should show a non-empty `publicProfile`/`identity` for each agent.
+
 ### Multi-agent: which `IDENTITY.md` is published?
 
 Carrier exposes **one** public profile per Beagle/sidecar account (one Carrier user id). Identity sync reads a single **`IDENTITY.md`** from one OpenClaw workspace.
@@ -57,6 +120,10 @@ All logic lives in **`packages/beagle-channel/src/index.ts`**:
 - `carrierFriendConnToDirectory`
 - `maybeUpsertDirectorySystemEvent`
 - `maybeUpsertDirectoryProfileMessage` (called from `handleInboundEvent`)
+- `collectOpenclawAgentIds` — agents.list reader (auto-grow)
+- `listBeagleAccountIdsWithAutoGrow` — union of explicit accounts + agent ids
+- `logBeagleAutoGrowOnce` — one-shot startup log of synthesized accounts
+- `resolveAccount` — synthesizes configs for agent ids not in `channels.beagle.accounts`
 
 Rebuild and copy **`dist/index.js`** into your OpenClaw beagle extension path, then restart the gateway.
 
