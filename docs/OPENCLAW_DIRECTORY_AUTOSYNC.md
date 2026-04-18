@@ -20,7 +20,8 @@ On each inbound Beagle event, after dedupe and routing resolution:
 | Environment variable | Default | Purpose |
 |----------------------|---------|---------|
 | `DIRECTORY_UPSERT_URL` | `http://127.0.0.1:3000/tools/directory_upsert` | Directory HTTP tool base (POST JSON body) |
-| `BEAGLE_DIRECTORY_AUTOSYNC_AGENTS` | `dirs` | Comma-separated OpenClaw **`agentId`** values that may HTTP-write the directory (profile + presence). If inbound Beagle routes to **`main`** or **`beagle-profile`** instead of **`dirs`**, autosync is skipped unless you add those ids here (e.g. `dirs,beagle-profile`) or add a **`channel: beagle`** binding to **`dirs`**. |
+| `BEAGLE_DIRECTORY_AUTOSYNC_ACCOUNTS` | `dirs` | Comma-separated Beagle **`accountId`** values that are "directory accounts". All traffic on these accounts is HTTP-written to the directory regardless of which local OpenClaw agent per-peer bindings route it to. This is the primary filter and handles the common case automatically — peers that advertise an `agentName` (e.g. `beagle-profile`) which OpenClaw mirrors into the route but has no matching local agent still get their profile/presence autosynced. |
+| `BEAGLE_DIRECTORY_AUTOSYNC_AGENTS` | `dirs` | Comma-separated OpenClaw **`agentId`** values that may HTTP-write the directory. Additive to the account filter — useful only if you multiplex a single Beagle account across directory + non-directory agents. In the common one-account-per-directory deployment, this variable can be ignored. |
 | `CARRIER_FRIEND_INFO_ONE_CONNECTED` | unset | Set to **`1`** only if `friend_info` uses **`1` = connected** (non‑Elastos enum order) |
 
 The directory web server must expose **`POST /tools/directory_upsert`** (no auth in stock directory).

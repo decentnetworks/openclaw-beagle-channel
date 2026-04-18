@@ -987,15 +987,49 @@ function isDirectoryAutosyncAgent(agentId: string): boolean {
   return allowed.includes(String(agentId || "").trim());
 }
 
+/**
+ * Which Beagle accounts are the "directory" account (comma-separated). Default `dirs`.
+ *
+ * Account-based guard is the primary filter because it is the stable property of the
+ * inbound envelope: the sidecar delivers messages for the `dirs` Carrier account regardless
+ * of which local OpenClaw agent per-peer bindings dispatch them to. This avoids silently
+ * dropping autosync when OpenClaw routes a peer to a local agent id the sidecar plugin
+ * doesn't know about (e.g. the peer advertises `agentName: "beagle-profile"` and OpenClaw
+ * mirrors that into the route, but no local agent with that id exists or is in the
+ * agent allowlist).
+ */
+function isDirectoryAutosyncAccount(accountId: string): boolean {
+  const raw = String(process.env.BEAGLE_DIRECTORY_AUTOSYNC_ACCOUNTS || "").trim();
+  const allowed = (raw ? raw : "dirs")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return allowed.includes(String(accountId || "").trim());
+}
+
+/**
+ * Autosync runs when EITHER:
+ *   - the Beagle account is a directory account (default: `dirs`), OR
+ *   - the routed local agent id is in the legacy agent allowlist.
+ *
+ * The account check is sufficient by itself for the common case (one Beagle account = one
+ * directory). The agent allowlist is kept for deployments that multiplex a single beagle
+ * account across directory + non-directory agents.
+ */
+function shouldDirectoryAutosync(accountId: string, agentId: string): boolean {
+  return isDirectoryAutosyncAccount(accountId) || isDirectoryAutosyncAgent(agentId);
+}
+
 async function maybeUpsertDirectorySystemEvent(params: {
+  /** Beagle account id — primary filter; must be in BEAGLE_DIRECTORY_AUTOSYNC_ACCOUNTS (default: dirs). */
   accountId: string;
-  /** OpenClaw agent id receiving this inbound (from routing); must be in BEAGLE_DIRECTORY_AUTOSYNC_AGENTS (default: dirs) */
+  /** OpenClaw agent id receiving this inbound (from routing). Accepted if in BEAGLE_DIRECTORY_AUTOSYNC_AGENTS. */
   agentId: string;
   body: string;
   fallbackPeerId: string;
   log?: any;
 }) {
-  if (!isDirectoryAutosyncAgent(params.agentId)) return false;
+  if (!shouldDirectoryAutosync(params.accountId, params.agentId)) return false;
 
   const text = extractEmbeddedSystemEventJson(String(params.body ?? "").trim()) || String(params.body ?? "").trim();
   if (!text.startsWith("{")) return false;
@@ -1072,12 +1106,15 @@ async function maybeUpsertDirectorySystemEvent(params: {
  * Preserves nested `publicProfile` (IDENTITY.md) to directory — the LLM path often omits it when flattening curl bodies.
  */
 async function maybeUpsertDirectoryProfileMessage(params: {
+  /** Beagle account id — primary filter; must be in BEAGLE_DIRECTORY_AUTOSYNC_ACCOUNTS (default: dirs). */
+  accountId: string;
+  /** OpenClaw agent id receiving this inbound (from routing). Accepted if in BEAGLE_DIRECTORY_AUTOSYNC_AGENTS. */
   agentId: string;
   body: string;
   fallbackPeerId: string;
   log?: any;
 }): Promise<boolean> {
-  if (!isDirectoryAutosyncAgent(params.agentId)) return false;
+  if (!shouldDirectoryAutosync(params.accountId, params.agentId)) return false;
 
   const text = extractEmbeddedSystemEventJson(String(params.body ?? "").trim()) || String(params.body ?? "").trim();
   if (!text.startsWith("{")) return false;
@@ -1918,6 +1955,7 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
     }
 
     const profileUpserted = await maybeUpsertDirectoryProfileMessage({
+      accountId,
       agentId: route.agentId,
       body,
       fallbackPeerId: conversationId,
