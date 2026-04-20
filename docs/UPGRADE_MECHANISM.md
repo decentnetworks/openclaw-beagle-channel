@@ -75,30 +75,38 @@ feature**. This matches how openclaw itself was designed.
 
 ## Scheduled flow
 
-`deploy/scripts/scheduled-update.sh` runs three ordered steps, each
+`deploy/scripts/scheduled-update.sh` runs four ordered steps, each
 independently skippable:
 
 ```
 ┌── openclaw update --yes ────────────────────┐   ← step 1 (CLI + core)
 │                                             │
-├── openclaw plugins update --all ────────────┤   ← step 2 (tracked plugins,
-│                                             │               incl. beagle-channel)
-├── deploy/scripts/update-sidecar.sh ─────────┤   ← step 3 (C++ sidecar)
-│    ├── git pull --ff-only                   │
-│    ├── cmake -S … -B …/build                │
-│    ├── cmake --build …/build                │
-│    └── systemctl --user restart beagle-...  │
+├── openclaw plugins update --all ────────────┤   ← step 2 (tracked plugins;
+│                                             │      no-op for beagle today)
+├── git pull --ff-only in the repo ───────────┤   ← step 3 (source refresh)
+│                                             │
+├── install.sh (BEAGLE_INSTALL_RESTART=1) ────┤   ← step 4 (build + install
+│    ├── cmake rebuild of beagle-sidecar      │         + service restart)
+│    ├── npm run build in beagle-channel      │
+│    ├── raw-cp → ~/.openclaw/extensions/...  │
+│    └── systemctl --user restart both units  │
 └─────────────────────────────────────────────┘
 ```
 
 - Ordering matters: core before plugins (plugin manifest may reference
-  newer core APIs); plugins before sidecar (sidecar restart is the most
-  disruptive — do it last).
+  newer core APIs); source refresh before install (install.sh builds
+  from the working tree); install.sh last because its service restart is
+  the most disruptive event.
+- Step 4 is the channel's upgrade path until the openclaw install-
+  heuristic false-positive is fixed (see "Open questions" below). Once
+  `openclaw plugins install --link` works for beagle-channel, step 2
+  starts doing the channel refresh and step 4 can shrink to sidecar-only.
 - Each step fails loud (non-zero exit → unit fails → journal has the
   stack). Timer retries on next tick; no in-script retry loop. Easier to
   debug, and we'd rather miss one cycle than thrash.
-- `update-sidecar.sh` bails early if `git HEAD` didn't move and the binary
-  already exists. Avoids needless rebuild churn.
+- `deploy/scripts/update-sidecar.sh` is not invoked by the timer. It
+  remains as a standalone op-tool — "just rebuild the sidecar" — for
+  manual runs. It short-circuits when `git HEAD` hasn't moved.
 
 ## What to install for a new host
 

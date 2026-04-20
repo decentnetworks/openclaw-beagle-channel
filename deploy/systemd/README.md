@@ -11,15 +11,23 @@ On a weekly timer (Mon 04:30 local + up to 30min jitter), run
 
 1. `openclaw update --yes` — upgrades the openclaw CLI itself (built-in
    self-upgrade path, JS).
-2. `openclaw plugins update --all` — refreshes every tracked plugin,
-   including `@beagle/openclaw-channel` if it was installed with
-   `openclaw plugins install --link` (see the repo root `install.sh`).
-3. [`deploy/scripts/update-sidecar.sh`](../scripts/update-sidecar.sh) —
-   `git pull` + `cmake --build` + `systemctl --user restart
-   beagle-sidecar.service`. The C++ sidecar is **not** covered by
-   `openclaw update`; this is the piece that keeps it current.
+2. `openclaw plugins update --all` — refreshes every tracked plugin. **No-op
+   for beagle-channel today** because the openclaw install-time heuristic
+   blocks its bundle (see [`docs/UPGRADE_MECHANISM.md`](../../docs/UPGRADE_MECHANISM.md))
+   and we fall back to a raw-cp install without a tracking record.
+3. `git pull --ff-only` in the repo — picks up new sidecar + channel source.
+4. `install.sh` (with `BEAGLE_INSTALL_RESTART=1`) — rebuilds the C++ sidecar,
+   rebuilds beagle-channel (`npm run build`), refreshes the raw-cp install
+   under `~/.openclaw/extensions/beagle/`, and restarts
+   `beagle-sidecar.service` + `openclaw-gateway.service`. This is the only
+   way beagle-channel source changes reach a running host today.
 
 Each step is independently skippable (see env vars in the scripts).
+
+[`deploy/scripts/update-sidecar.sh`](../scripts/update-sidecar.sh) is kept
+as a standalone tool for operators who only want to rebuild+restart the
+C++ sidecar without touching anything else. `scheduled-update.sh` does
+not call it — it invokes the full `install.sh` instead.
 
 ## Install
 
