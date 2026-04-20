@@ -1,0 +1,15 @@
+[Unit]
+Description=Weekly scheduled upgrade for openclaw + beagle-channel + beagle-sidecar
+Documentation=file:%h/devs/openclaw-beagle-channel/deploy/systemd/README.md
+
+[Timer]
+# Weekly-ish, off-peak. Adjust via a drop-in if your fleet needs a different
+# cadence or time window. RandomizedDelaySec prevents every host in a fleet
+# from hitting the git remote + npm registry at the same second.
+OnCalendar=Mon *-*-* 04:30:00
+RandomizedDelaySec=30min
+Persistent=true
+Unit=openclaw-beagle-channel-update.service
+
+[Install]
+WantedBy=timers.target

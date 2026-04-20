@@ -50,7 +50,21 @@ build_channel() {
 }
 
 install_channel_plugin() {
-  log "Installing beagle-channel plugin to $EXT_DIR"
+  # Prefer the openclaw CLI: it records provenance so `openclaw plugins update`
+  # and `openclaw plugins list` can see the plugin as tracked (not "loaded
+  # without install/load-path provenance"). Falls back to a raw copy only if
+  # the CLI is missing — keeps the install script usable on hosts that
+  # bootstrap beagle before openclaw, or for CI where we just want files in
+  # place.
+  if command -v openclaw >/dev/null 2>&1; then
+    log "Registering beagle-channel via openclaw plugins install --link"
+    openclaw plugins install --link --force "$CHANNEL_DIR"
+    return
+  fi
+
+  log "openclaw CLI not found; falling back to raw copy into $EXT_DIR"
+  log "  (install openclaw later and run 'openclaw plugins install --link $CHANNEL_DIR'"
+  log "   to pick up provenance + enable 'openclaw plugins update')"
   mkdir -p "$EXT_DIR"
 
   cp "$CHANNEL_DIR/package.json" "$EXT_DIR/"
@@ -61,16 +75,40 @@ install_channel_plugin() {
   cp -R "$CHANNEL_DIR/dist" "$EXT_DIR/"
 }
 
+restart_services() {
+  # Only restart if systemd user units exist AND the caller opted in. Keeps
+  # this script safe to run from a dev checkout without disturbing prod.
+  if [[ "${BEAGLE_INSTALL_RESTART:-0}" != "1" ]]; then
+    return
+  fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    log "systemctl not available; skipping service restart"
+    return
+  fi
+
+  for unit in beagle-sidecar.service openclaw-gateway.service; do
+    if systemctl --user cat "$unit" >/dev/null 2>&1; then
+      log "systemctl --user restart $unit"
+      systemctl --user restart "$unit"
+    fi
+  done
+}
+
 main() {
   need_cmd cp
 
   build_sidecar
   build_channel
   install_channel_plugin
+  restart_services
 
   log "Done"
   log "Sidecar binary: $SIDECAR_DIR/build/beagle-sidecar"
   log "Plugin dir: $EXT_DIR"
+  log ""
+  log "Next steps:"
+  log "  - If not already registered, run: openclaw plugins install --link $CHANNEL_DIR"
+  log "  - To enable scheduled upgrades, see: deploy/systemd/README.md"
 }
 
 main "$@"

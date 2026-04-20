@@ -1,0 +1,36 @@
+[Unit]
+Description=Scheduled upgrade for openclaw + beagle-channel + beagle-sidecar
+Documentation=file:%h/devs/openclaw-beagle-channel/deploy/systemd/README.md
+# Don't race other restarts.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Point this at wherever the repo is checked out for this user. Override with
+# a systemctl --user edit drop-in if your checkout is somewhere other than
+# ~/devs/openclaw-beagle-channel.
+Environment=REPO_DIR=%h/devs/openclaw-beagle-channel
+
+# Optional: build with the real Beagle SDK. Leave unset to build sidecar in
+# stub mode. Set via drop-in rather than editing this file.
+# Environment=BEAGLE_SDK_ROOT=%h/devs/beagle-sdk
+
+# Optional skip flags for partial hosts (e.g. CI, dev boxes without
+# systemd-managed sidecar). See scheduled-update.sh for the list.
+# Environment=SKIP_SIDECAR_UPDATE=1
+
+ExecStart=%h/devs/openclaw-beagle-channel/deploy/scripts/scheduled-update.sh
+
+# Keep output in the journal under this unit's name.
+StandardOutput=journal
+StandardError=journal
+
+# Don't let a hung update block the timer forever.
+TimeoutStartSec=30min
+
+# Update can legitimately fail if network is down or the registry is flaky.
+# Don't mask intermittent failure by restarting — the next timer tick will
+# try again. Operators watch `systemctl --user status <unit>` + journal.
+Restart=no
