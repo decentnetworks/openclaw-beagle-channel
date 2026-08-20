@@ -2357,6 +2357,12 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
         outputTextItems.join("\n")
       );
     };
+    const isInternalDispatchFailure = (text: string): boolean => {
+      const normalized = text.toLowerCase();
+      return normalized.includes("auto-compaction could not recover")
+        || normalized.includes("did not produce a final reply")
+        || normalized.includes("timeout before final reply");
+    };
     let queuedFinal: any;
     try {
       const result: any = await Promise.race([dispatchPromise, timeoutPromise]);
@@ -2364,7 +2370,7 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
       api?.logger?.info?.(`[beagle] dispatch queuedFinal=${queuedFinal} duration_ms=${Date.now() - dispatchStart}`);
       if (queuedFinal !== true && deliveredCount === 0) {
         const recoveredText = extractDispatchResultText(result);
-        if (recoveredText) {
+        if (recoveredText && !isInternalDispatchFailure(recoveredText)) {
           const replyText = isGroup
             ? buildCarrierGroupReplyText(recoveredText, parsedGroup as ParsedGroupInbound)
             : recoveredText;
@@ -2375,19 +2381,17 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
           await sendStatus("idle", "recovered_result_text", true);
           return;
         }
+        if (recoveredText) {
+          api?.logger?.warn?.("[beagle] suppressing internal dispatch failure text");
+          await sendStatus("idle", "suppressed_dispatch_failure", true);
+          return;
+        }
         if (isSystemEvent) {
           api?.logger?.info?.("[beagle] dispatch completed without reply for system event; skipping fallback");
           return;
         }
-        const fallbackText = isGroup
-          ? buildCarrierGroupReplyText(
-              "I received your message but did not produce a final reply. Please resend.",
-              parsedGroup as ParsedGroupInbound
-            )
-          : "I received your message but did not produce a final reply. Please resend.";
-        api?.logger?.warn?.("[beagle] dispatch completed without outbound reply; sending fallback");
-        await client.sendText({ peer: normalizedPeerId, text: fallbackText });
-        await sendStatus("idle", "fallback", true);
+        api?.logger?.warn?.("[beagle] dispatch completed without outbound reply; suppressing fallback");
+        await sendStatus("idle", "suppressed_no_final", true);
       }
     } catch (err: any) {
       api?.logger?.warn?.(`[beagle] dispatch failed duration_ms=${Date.now() - dispatchStart}: ${String(err)}`);
@@ -2396,15 +2400,8 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
           api?.logger?.info?.("[beagle] dispatch failed for system event; skipping timeout fallback");
           return;
         }
-        const fallbackText = isGroup
-          ? buildCarrierGroupReplyText(
-              "I hit a timeout before final reply. Please resend once.",
-              parsedGroup as ParsedGroupInbound
-            )
-          : "I hit a timeout before final reply. Please resend once.";
-        api?.logger?.warn?.("[beagle] dispatch failed without outbound reply; sending timeout fallback");
-        await client.sendText({ peer: normalizedPeerId, text: fallbackText });
-        await sendStatus("idle", "timeout_fallback", true);
+        api?.logger?.warn?.("[beagle] dispatch failed without outbound reply; suppressing fallback");
+        await sendStatus("idle", "suppressed_dispatch_error", true);
       }
     }
   } catch (err: any) {
