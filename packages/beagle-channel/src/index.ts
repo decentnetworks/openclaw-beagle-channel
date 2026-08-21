@@ -2250,9 +2250,14 @@ async function handleInboundEvent(api: any, accountId: string, account: BeagleAc
             api?.logger?.warn?.("[beagle] suppress outbound payload after timeout");
             return;
           }
+          const text = String(payload?.text ?? "");
+          if (text.toLowerCase().includes("auto-compaction could not recover")) {
+            api?.logger?.warn?.("[beagle] suppressing internal compaction failure output");
+            await sendStatus("idle", "suppressed_compaction_failure", true);
+            return;
+          }
           deliveredCount += 1;
           if (info?.kind === "final") await sendStatus("sending", "final", true);
-          const text = payload?.text ?? "";
           api?.logger?.info?.(`[beagle] deliver kind=${payload?.kind ?? "unknown"} text_len=${text.length}`);
           let mediaUrl = payload?.mediaUrl || (Array.isArray(payload?.mediaUrls) ? payload.mediaUrls[0] : "");
           let mediaPath = payload?.mediaPath || payload?.filePath || payload?.attachmentPath || "";
